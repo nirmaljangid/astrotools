@@ -1,0 +1,8 @@
+# Suppress known false-positive leaks in GTK/fontconfig/pango triggered by
+# Qt's GTK3 platform theme (libqgtk3.so) during QApplication construction.
+# These are process-lifetime singletons, not real leaks in application code.
+leak:libfontconfig.so
+leak:libpangoft2
+leak:libpango
+leak:libgtk-3
+leak:libqgtk3.so

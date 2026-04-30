@@ -1197,10 +1197,11 @@ static FitsLoadResult loadFitsImage(const QString& path, const QString& stretchM
 // Auto-review: star detection for light-frame quality checks
 // ============================================================
 struct StarDetectionResult {
-    int  starCount    = 0;
-    int  trailCount   = 0;
-    bool hasTrails    = false;
-    bool isOutOfFocus = false;
+    int  starCount       = 0;
+    int  trailCount      = 0;
+    bool hasTrails       = false;
+    bool isOutOfFocus    = false;
+    float maxFocusBlobDim = 0.0f; // longest dim of largest defocused blob
 };
 
 static StarDetectionResult detectStarsInBuf(const std::vector<float>& buf, int nx, int ny)
@@ -1277,6 +1278,7 @@ static StarDetectionResult detectStarsInBuf(const std::vector<float>& buf, int n
                 res.hasTrails = true;
             } else if (longer > 50.0f) {
                 res.isOutOfFocus = true;
+                if (longer > res.maxFocusBlobDim) res.maxFocusBlobDim = longer;
             } else if (area <= 2000) {
                 res.starCount++;
             }
@@ -1289,8 +1291,11 @@ struct AutoReviewItem {
     QString path;
     bool    isCalib         = false;
     int     starCount       = 0;
+    int     trailCount      = 0;
     bool    hasTrails       = false;
     bool    isOutOfFocus    = false;
+    float   maxFocusBlobDim = 0.0f;
+    int     score           = 100; // 0-100; <50 = suggest delete, 50-69 = warn/tolerate, ≥70 = good
     bool    deleteSuggested = false;
     QString reason;
 };
@@ -1333,20 +1338,49 @@ static AutoReviewItem analyzeFrame(const QString& path)
     if (st) { item.reason = "Read error"; return item; }
 
     auto det = detectStarsInBuf(buf, (int)nx, (int)ny);
-    item.starCount    = det.starCount;
-    item.hasTrails    = det.hasTrails;
-    item.isOutOfFocus = det.isOutOfFocus;
+    item.starCount       = det.starCount;
+    item.trailCount      = det.trailCount;
+    item.hasTrails       = det.hasTrails;
+    item.isOutOfFocus    = det.isOutOfFocus;
+    item.maxFocusBlobDim = det.maxFocusBlobDim;
+
+    // Score: 100 = perfect; <50 = delete suggested; 50-69 = tolerable warning
+    int score = 100;
+
+    // Trail penalty: small trails tolerated (1-2 trails = ~-20/-40), 3+ = hard reject
+    if (det.trailCount > 0) {
+        int trailPenalty = std::min(det.trailCount * 20, 65);
+        score -= trailPenalty;
+    }
+
+    // Focus penalty: slight defocus (50-100px blob) = -20, severe (>100px) = -45
+    if (det.isOutOfFocus) {
+        score -= (det.maxFocusBlobDim < 100.0f) ? 20 : 45;
+    }
+
+    // Low star count penalty (only when focus/trails aren't the primary issue)
+    if (det.starCount < 15 && !det.isOutOfFocus) {
+        score -= (15 - det.starCount) * 2;
+    }
+
+    score = std::max(0, score);
+    item.score = score;
 
     QStringList reasons;
-    if (det.hasTrails)    reasons << QString("star trails (%1 source%2)").arg(det.trailCount).arg(det.trailCount==1?"":"s");
-    if (det.isOutOfFocus) reasons << "out of focus";
+    if (det.trailCount > 0) {
+        QString severity = (det.trailCount == 1) ? "minor" : (det.trailCount <= 2 ? "moderate" : "severe");
+        reasons << QString("%1 star trail%2 (%3)")
+                     .arg(det.trailCount).arg(det.trailCount==1?"":"s").arg(severity);
+    }
+    if (det.isOutOfFocus) {
+        QString severity = (det.maxFocusBlobDim < 100.0f) ? "slightly" : "severely";
+        reasons << QString("%1 out of focus").arg(severity);
+    }
     if (det.starCount < 10 && !det.isOutOfFocus)
         reasons << QString("only %1 star%2 detected").arg(det.starCount).arg(det.starCount==1?"":"s");
 
-    if (!reasons.isEmpty()) {
-        item.deleteSuggested = true;
-        item.reason = reasons.join(", ");
-    }
+    item.reason = reasons.join(", ");
+    item.deleteSuggested = (score < 50);
     return item;
 }
 
@@ -1655,15 +1689,21 @@ private:
     }
 
     void showAutoReviewResults(const QVector<AutoReviewItem>& results) {
-        // Collect flagged light frames
-        QVector<AutoReviewItem> bad;
+        // Collect flagged light frames: score <70 shown; <50 pre-checked for deletion
+        QVector<AutoReviewItem> flagged;
         int calibCount = 0;
         for (const auto& r : results) {
             if (r.isCalib) { calibCount++; continue; }
-            if (r.deleteSuggested) bad.append(r);
+            if (r.score < 70) flagged.append(r);
         }
+        // Sort worst first
+        std::sort(flagged.begin(), flagged.end(),
+                  [](const AutoReviewItem& a, const AutoReviewItem& b){ return a.score < b.score; });
 
-        if (bad.isEmpty()) {
+        int deleteCount = 0;
+        for (const auto& r : flagged) if (r.deleteSuggested) deleteCount++;
+
+        if (flagged.isEmpty()) {
             QMessageBox::information(this, "Auto Review — All Good",
                 QString("All %1 light frame%2 look good!%3")
                     .arg(results.size() - calibCount)
@@ -1674,14 +1714,18 @@ private:
         }
 
         QDialog dlg(this);
-        dlg.setWindowTitle(QString("Auto Review — %1 issue%2 found").arg(bad.size()).arg(bad.size()==1?"":"s"));
-        dlg.resize(720, 420);
+        dlg.setWindowTitle(QString("Auto Review — %1 flagged").arg(flagged.size()));
+        dlg.resize(780, 460);
         auto* vl = new QVBoxLayout(&dlg);
 
         auto* hdr = new QLabel(
-            QString("%1 file%2 flagged. Uncheck any you want to keep, then click Delete.")
-                .arg(bad.size()).arg(bad.size()==1?"":"s"));
-        hdr->setStyleSheet("QLabel{color:#ffd060;font-weight:bold;font-size:10pt;padding:6px 4px;}");
+            QString("%1 file%2 flagged.  "
+                    "<span style='color:#ff6060'>Red = delete suggested (score &lt;50)</span>,  "
+                    "<span style='color:#ffd060'>yellow = tolerable (score 50–69)</span>.  "
+                    "Uncheck to keep.")
+                .arg(flagged.size()).arg(flagged.size()==1?"":"s"));
+        hdr->setTextFormat(Qt::RichText);
+        hdr->setStyleSheet("QLabel{font-size:9pt;padding:6px 4px;}");
         vl->addWidget(hdr);
 
         if (calibCount)
@@ -1691,21 +1735,30 @@ private:
         auto* list = new QListWidget;
         list->setAlternatingRowColors(true);
         list->setSpacing(1);
-        for (const auto& item : bad) {
-            QString label = QString("[%1 star%2]  %3  —  %4")
+        for (const auto& item : flagged) {
+            QString label = QString("[score %1 | %2 star%3]  %4  —  %5")
+                .arg(item.score, 3)
                 .arg(item.starCount)
                 .arg(item.starCount==1?"":"s")
                 .arg(QFileInfo(item.path).fileName())
-                .arg(item.reason);
+                .arg(item.reason.isEmpty() ? "ok" : item.reason);
             auto* li = new QListWidgetItem(label, list);
-            li->setCheckState(Qt::Checked);
             li->setData(Qt::UserRole, item.path);
-            li->setForeground(QColor(255, 160, 100));
+            if (item.deleteSuggested) {
+                // score < 50: pre-checked, red
+                li->setCheckState(Qt::Checked);
+                li->setForeground(QColor(255, 100, 100));
+            } else {
+                // score 50-69: unchecked (tolerable), yellow
+                li->setCheckState(Qt::Unchecked);
+                li->setForeground(QColor(255, 208, 80));
+            }
         }
         vl->addWidget(list, 1);
 
         auto* btnRow = new QHBoxLayout;
-        auto* delBtn = new QPushButton(QString("Delete Checked (%1)").arg(bad.size()));
+        auto* delBtn = new QPushButton(QString("Delete Checked (%1)").arg(deleteCount));
+        delBtn->setEnabled(deleteCount > 0);
         delBtn->setStyleSheet(
             "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #7a1818,stop:1 #5a1010);"
             "color:#ffaaaa;border:1px solid #aa3030;border-radius:5px;padding:6px 18px;font-weight:bold;}"
@@ -2806,12 +2859,7 @@ public:
     explicit ToolsPanel(QWidget* parent=nullptr) : QWidget(parent) {
         auto* vbox = new QVBoxLayout(this);
         vbox->setContentsMargins(0,0,0,0); vbox->setSpacing(0);
-        auto* tabs = new QTabWidget;
-        tabs->setDocumentMode(true);
-        tabs->addTab(new SortFitsPanel,    "Sort FITS by Object / Filter");
-        tabs->addTab(new ArrangeFitsPanel, "Arrange for Stacking");
-        tabs->addTab(new SirilStackPanel,  "Stack with Siril");
-        vbox->addWidget(tabs);
+        vbox->addWidget(new ArrangeFitsPanel);
     }
 };
 

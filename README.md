@@ -1,6 +1,6 @@
 # Astro Toolkit
 
-A single-binary Qt6 desktop application combining a deep-sky **target planner**, a **FITS image reviewer** with auto-quality-check, and a **FITS processing pipeline** (sort → arrange → stack with Siril).
+A single-binary Qt6 desktop application combining a deep-sky **target planner**, a **FITS image reviewer** with scored auto-quality-check, and a **FITS frame arranger** for stacking preparation.
 
 ---
 
@@ -28,10 +28,8 @@ A single-binary Qt6 desktop application combining a deep-sky **target planner**,
 | **Framing helper** | DSS sky survey overlay with your sensor footprint drawn to scale |
 | **AI imaging plan** | Calls OpenAI to generate a per-object imaging plan (exposure times, filter sets, stacking advice) |
 | **FITS Reviewer** | Browse any folder of FITS files, view with four stretch modes, delete bad frames manually or via Auto Review |
-| **Auto Review** | Scans all loaded frames, detects out-of-focus images, star trails, and frames with fewer than 10 detected stars; flags them for batch deletion |
-| **Sort FITS** | Sorts raw frames into `Object/Filter/[Exposure]/` folder trees using cfitsio header data |
+| **Auto Review** | Scores every light frame 0–100 for trail count, focus quality, and star count; pre-checks hard rejects (<50) for deletion while leaving tolerable frames (50–69) unchecked for manual review |
 | **Arrange for Stacking** | Matches calibration frames (bias, dark, flat) to light frames by gain, exposure, and sensor dimensions |
-| **Stack with Siril** | Generates Siril scripts and runs stacking end-to-end from within the app |
 
 ---
 
@@ -209,23 +207,10 @@ Several built-in presets are available in the profile dialog as a starting point
 
 ### Tools _(tab 1)_
 
-Three sub-tabs in workflow order:
-
-#### Sort FITS by Object / Filter
-- Set **Source** folder (raw captured frames) and **Destination** folder.
-- Optionally enable **Split by exposure time** or **Dry run** (preview without moving files).
-- Output structure: `Destination/ObjectName/FilterName/[ExposureTime]/filename.fit`
-- Calibration frames are detected automatically by `IMAGETYP` and sorted into `bias/`, `dark/`, `flat/` sub-folders.
-
 #### Arrange for Stacking
-- Point to the sorted folder produced by the previous step.
+- Point to a folder containing your sorted light frames and calibration frames.
 - The app matches calibration frames to each set of lights by gain (±15%), exposure (±10%), and exact sensor dimensions.
-- Produces a structured folder ready for Siril.
-
-#### Stack with Siril
-- Reads the arranged folder, generates Siril `.ssf` scripts for each target/filter combination, and runs `siril-cli` automatically.
-- Live log output is shown in the panel.
-- Requires `siril-cli` to be in `PATH`.
+- Produces a structured folder tree ready for stacking in Siril or any other stacker.
 
 ### Target Planner tabs _(tabs 2–6)_
 
@@ -270,15 +255,31 @@ The **⚡ Auto Review…** button scans every file currently loaded in the FITS 
    - Each blob is classified by its bounding-box size and aspect ratio:
      - **Valid star** — small, roughly round blob (aspect ratio < 4.5, bbox ≤ 50 px)
      - **Star trail** — highly elongated blob (aspect ratio ≥ 4.5)
-     - **Out of focus** — large round blob (bbox > 50 px)
+     - **Out of focus** — large round blob (longest bbox dimension > 50 px)
 
-3. A frame is **flagged for deletion** if any of the following are true:
-   - One or more star trails detected
-   - Out-of-focus blobs detected
-   - Fewer than **10 valid stars** detected
+3. Each frame receives a **quality score (0–100)**:
 
-4. A **results dialog** lists every flagged file with its reason and star count.  
-   Each file has a checkbox (checked by default). Uncheck any files you want to keep, then click **Delete Checked** to permanently remove only the checked files.
+   | Issue | Penalty |
+   |-------|---------|
+   | 1 star trail | −20 |
+   | 2 star trails | −40 |
+   | 3+ star trails | −60 (cap) |
+   | Slight defocus (blob 50–100 px) | −20 |
+   | Severe defocus (blob > 100 px) | −45 |
+   | Each star below 15 (when focus is fine) | −2 |
+
+4. Frames are grouped by score:
+
+   | Score | Result | Dialog colour |
+   |-------|--------|---------------|
+   | ≥ 70 | Good — not shown | — |
+   | 50–69 | Tolerable — shown, **unchecked** (yellow) | Yellow |
+   | < 50 | Delete suggested — shown, **pre-checked** (red) | Red |
+
+   A single minor trail or slight defocus typically scores 80, keeping it out of the pre-checked list.
+
+5. A **results dialog** lists all flagged files sorted worst-first, each showing its score, star count, and reason.  
+   Uncheck any files you want to keep, then click **Delete Checked** to permanently remove only the checked files.
 
 > Analysis runs in a background thread. The status bar shows `Auto-reviewing N/total…` while processing. Large FITS files (e.g. 6000×4000) take 1–3 seconds each.
 
