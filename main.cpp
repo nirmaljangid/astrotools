@@ -261,6 +261,40 @@ static void saveConfig(const AppConfig& cfg){
   f.write(s.c_str(),s.size());
 }
 
+// Locate the starter catalogue bundled with the app — searched across the build
+// tree, the install prefix (<prefix>/bin + <prefix>/share), and system data dirs.
+// Returns the first that exists, or an empty string.
+static QString findBundledCatalog() {
+  const QString appDir = QCoreApplication::applicationDirPath();
+  const QStringList candidates = {
+    appDir + "/catalog.sqlite",
+    appDir + "/data/catalog.sqlite",
+    appDir + "/../data/catalog.sqlite",                 // running from build/ beside repo data/
+    appDir + "/../share/astro_toolkit/catalog.sqlite",  // installed: <prefix>/bin + <prefix>/share
+    "/usr/local/share/astro_toolkit/catalog.sqlite",
+    "/usr/share/astro_toolkit/catalog.sqlite",
+    QStringLiteral("data/catalog.sqlite"),              // running from the repo root
+  };
+  for (const auto& p : candidates)
+    if (QFileInfo::exists(p)) return QFileInfo(p).absoluteFilePath();
+  return {};
+}
+
+// On first run (configured catalogue missing) seed it from the bundled starter
+// catalogue so the planner works out of the box. Returns true if a DB is present.
+static bool ensureCatalogPresent(const AppConfig& cfg) {
+  if (QFile::exists(cfg.sqlitePath)) return true;
+  const QString bundled = findBundledCatalog();
+  if (bundled.isEmpty() || bundled == QFileInfo(cfg.sqlitePath).absoluteFilePath())
+    return false;
+  QDir().mkpath(QFileInfo(cfg.sqlitePath).absolutePath());
+  if (QFile::copy(bundled, cfg.sqlitePath)) {
+    qInfo("Seeded catalogue from bundled starter: %s", qUtf8Printable(bundled));
+    return true;
+  }
+  return false;
+}
+
 // ============================================================
 // CURL
 // ============================================================
@@ -2298,6 +2332,7 @@ class MainWindow : public QMainWindow {
 public:
   MainWindow() {
     cfg_ = loadConfig();
+    ensureCatalogPresent(cfg_);  // seed from bundled starter catalogue if missing
 
     setStyleSheet(theme::sub(R"(
       QMainWindow { background-color: @void@; }
@@ -2540,7 +2575,9 @@ private slots:
     if(!QFile::exists(cfg_.sqlitePath)){
       setEnabled(true);
       QMessageBox::critical(this,"SQLite DB missing",
-        "DB not found:\n"+cfg_.sqlitePath+"\n\nRun the importer first:\npython import_opengnc_sqlite.py --db \""+appDirPath()+"/catalog.sqlite\" --ngc NGC.csv --addendum addendum.csv --rebuild-aliases");
+        "DB not found:\n"+cfg_.sqlitePath+
+        "\n\nCopy the bundled starter catalogue:\ncp data/catalog.sqlite \""+cfg_.sqlitePath+"\""
+        "\n\n…or build the full catalogue with the importer:\npython import_opengnc_sqlite.py --db \""+appDirPath()+"/catalog.sqlite\" --ngc NGC.csv --addendum addendum.csv --rebuild-aliases");
       return;
     }
     auto fut=QtConcurrent::run([this](){
