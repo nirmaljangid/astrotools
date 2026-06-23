@@ -51,25 +51,27 @@ A single-binary Qt6 desktop application combining a deep-sky **target planner**,
 | Library | Purpose | Arch | Ubuntu | Fedora |
 |---------|---------|------|--------|--------|
 | **gpsd** | GPS-based location | `gpsd` | `libgps-dev` | `gpsd-devel` |
-| **Siril** | In-app stacking | `siril` | `siril` | `siril` |
+
+> The **Arrange** tab organises your frames into a stacker-ready folder tree; do the
+> actual stacking in [Siril](https://siril.org) (or any stacker) — it is not required to build or run this app.
 
 ### One-liner installs
 
 **Arch Linux**
 ```bash
-sudo pacman -S qt6-base curl cfitsio nlohmann-json cmake pkgconf gpsd siril
+sudo pacman -S qt6-base curl cfitsio nlohmann-json cmake pkgconf gpsd
 ```
 
 **Ubuntu / Debian**
 ```bash
 sudo apt-get install qt6-base-dev libcurl4-openssl-dev libcfitsio-dev \
-    nlohmann-json3-dev cmake pkg-config libgps-dev siril
+    nlohmann-json3-dev cmake pkg-config libgps-dev
 ```
 
 **Fedora**
 ```bash
 sudo dnf install qt6-qtbase-devel libcurl-devel cfitsio-devel \
-    nlohmann-json-devel cmake pkgconf gpsd-devel siril
+    nlohmann-json-devel cmake pkgconf gpsd-devel
 ```
 
 ---
@@ -196,26 +198,16 @@ Several built-in presets are available in the profile dialog as a starting point
 
 ## Tab-by-tab guide
 
-### FITS Reviewer _(tab 0)_
+The app is organised into three top-level tabs that follow the imaging workflow:
+**Plan → Review → Arrange**.
 
-1. Click **Browse…** or paste a folder path and press **Open** (or Enter).
-2. The left panel lists all `.fit/.fits/.fts` files found recursively.
-3. Click a file or use **◀ Prev / Next ▶** (or keyboard shortcuts) to navigate.
-4. Use the **Stretch** combo to switch between `linear`, `sqrt`, `log`, `asinh`.
-5. Click **Delete File** (or press `x` / `Del`) to permanently delete the current frame after confirmation.
-6. Click **⚡ Auto Review…** to run the automated quality check on all loaded files (see [Auto Review](#auto-review--how-it-works)).
+### Plan
 
-### Tools _(tab 1)_
+Deep-sky target planning. A row of sub-tabs selects the catalogue category; all of
+them share the right-hand panel (Sky Chart / Details / Framing).
 
-#### Arrange for Stacking
-- Point to a folder containing your sorted light frames and calibration frames.
-- The app matches calibration frames to each set of lights by gain (±15%), exposure (±10%), and exact sensor dimensions.
-- Produces a structured folder tree ready for stacking in Siril or any other stacker.
-
-### Target Planner tabs _(tabs 2–6)_
-
-| Tab | Content |
-|-----|---------|
+| Sub-tab | Content |
+|---------|---------|
 | Nebula (Ha/SHO) | Emission nebulae, scored for narrowband imaging |
 | Galaxies | Galaxy catalogue |
 | Star clusters | Open and globular clusters |
@@ -226,6 +218,26 @@ Several built-in presets are available in the profile dialog as a starting point
 - With a gear profile set, objects are also filtered by FOV fit (20%–90% of the long sensor axis).
 - Click any object to see its sky-path chart, full details, and an AI-generated imaging plan.
 - Switch the right panel between **Sky Chart**, **Details**, and **Framing** using the buttons at the bottom.
+- Categories load lazily the first time you open their sub-tab; **Refresh Targets** re-runs the whole plan.
+
+### Review
+
+Browse and cull a folder of FITS frames.
+
+1. Click **Browse…** or paste a folder path and press **Open** (or Enter). The last folder you opened is remembered between sessions.
+2. The left panel lists all `.fit/.fits/.fts` files found recursively.
+3. Click a file or use **◀ Prev / Next ▶** (or keyboard shortcuts) to navigate.
+4. Use the **Stretch** combo to switch between `linear`, `sqrt`, `log`, `asinh`.
+5. Click **Delete File** (or press `x` / `Del`) to permanently delete the current frame after confirmation.
+6. Click **⚡ Auto Review…** to run the automated quality check on all loaded files (see [Auto Review](#auto-review--how-it-works)).
+
+### Arrange
+
+Organise a messy capture folder into a stacker-ready tree.
+
+- Point to a folder containing your light frames and (optionally) calibration frames. Folders are remembered between sessions.
+- The app matches calibration frames to each set of lights by gain (±15%), exposure (±10%), and exact sensor dimensions.
+- Produces a structured folder tree (`arrange_<name>/Target/Filter/lights/…`) ready for stacking in Siril or any other stacker.
 
 ---
 
