@@ -1,5 +1,5 @@
 // Astro Toolkit — combined Qt6 application
-// Tabs: Target Picker (original cpp_pr) + FITS Reviewer + Tools (Sort/Stack)
+// Tabs: Plan (deep-sky target planner) · Review (FITS reviewer) · Arrange (stacking prep)
 
 #include <QtWidgets>
 #include <QtConcurrent>
@@ -17,6 +17,7 @@
 #include <QKeyEvent>
 #include <QFutureWatcher>
 #include <QScrollArea>
+#include <QSettings>
 
 #include <fitsio.h>
 
@@ -48,6 +49,49 @@ static double wrap2pi(double x) {
   x = std::fmod(x, 2.0 * M_PI);
   if (x < 0) x += 2.0 * M_PI;
   return x;
+}
+
+// ============================================================
+// Theme — palette + fonts ported from astrohusky.com design tokens
+// (see the site's :root in themes/astrohusky-theme/style.css)
+// ============================================================
+namespace theme {
+  constexpr const char* Void    = "#05060a"; // deepest background (window)
+  constexpr const char* Deep    = "#0a0d18"; // inputs, lists, canvases
+  constexpr const char* Panel   = "#11152a"; // cards, panes, popups
+  constexpr const char* Ink     = "#e9ecf5"; // primary text
+  constexpr const char* InkDim  = "#8b91a8"; // secondary text
+  constexpr const char* Nebula  = "#d946ef"; // magenta accent
+  constexpr const char* Plasma  = "#22d3ee"; // cyan — primary accent
+  constexpr const char* Stellar = "#f5b400"; // gold accent
+  constexpr const char* Aurora  = "#5eead4"; // teal — hover accent
+  constexpr const char* Danger  = "#f47272"; // error/destructive
+  constexpr const char* OnAccent= "#02121a"; // dark text on cyan fills
+
+  constexpr const char* FontSans    = "'Inter','Segoe UI','Ubuntu',sans-serif";
+  constexpr const char* FontDisplay = "'Space Grotesk','Inter','Segoe UI',sans-serif";
+  constexpr const char* FontMono    = "'JetBrains Mono','Consolas','Courier New',monospace";
+
+  // Substitute @token@ placeholders in a stylesheet with palette values, so
+  // every widget sheet draws from one source of truth.
+  inline QString sub(QString s) {
+    static const QPair<const char*, const char*> map[] = {
+      {"@void@",Void},{"@deep@",Deep},{"@panel@",Panel},{"@ink@",Ink},
+      {"@inkdim@",InkDim},{"@nebula@",Nebula},{"@plasma@",Plasma},
+      {"@stellar@",Stellar},{"@aurora@",Aurora},{"@danger@",Danger},
+      {"@onaccent@",OnAccent},{"@sans@",FontSans},{"@display@",FontDisplay},
+      {"@mono@",FontMono},
+    };
+    for (const auto& kv : map) s.replace(kv.first, kv.second);
+    return s;
+  }
+
+  // Translucent "chip" label (status pills in the toolbar). hue is an accent hex.
+  inline QString chip(const char* hue) {
+    return sub(QString("QLabel{font-family:@display@;font-weight:600;color:%1;"
+                       "background:rgba(255,255,255,0.03);border:1px solid %1;"
+                       "border-radius:999px;padding:4px 12px;}").arg(hue));
+  }
 }
 
 // ============================================================
@@ -595,37 +639,37 @@ public:
 protected:
   void paintEvent(QPaintEvent*)override{
     QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-    p.fillRect(rect(),QColor(4,8,14));
+    p.fillRect(rect(),QColor(10,13,24)); // --deep
     int w=width(),h=height(),s=std::min(w,h)-28; if(s<=0)return;
     QPointF c(w/2.0,h/2.0); double R=s/2.0;
-    // Atmospheric gradient
-    QRadialGradient g(c,R*1.1); g.setColorAt(0,QColor(15,35,65,40)); g.setColorAt(1,QColor(0,0,0,0));
+    // Atmospheric gradient (plasma-tinted)
+    QRadialGradient g(c,R*1.1); g.setColorAt(0,QColor(34,211,238,26)); g.setColorAt(1,QColor(0,0,0,0));
     p.fillRect(rect(),g);
-    
+
     // Altitude Rings
     for(int a:{30,60}){
       double rr=(90.0-a)/90.0*R;
-      QPen rp(QColor(40,85,130,120),1,Qt::DashLine); rp.setDashPattern({5,8}); p.setPen(rp); p.setBrush(Qt::NoBrush);
+      QPen rp(QColor(255,255,255,40),1,Qt::DashLine); rp.setDashPattern({5,8}); p.setPen(rp); p.setBrush(Qt::NoBrush);
       p.drawEllipse(c,rr,rr);
       double la=deg2rad(42.0);QPointF lp(c.x()+rr*sin(la),c.y()-rr*cos(la));
-      p.setFont(QFont("Inter",7));p.setPen(QColor(60,140,200,180));
+      p.setFont(QFont("Inter",7));p.setPen(QColor(139,145,168,200)); // --ink-dim
       p.drawText(QRectF(lp.x()-14,lp.y()-8,28,16),Qt::AlignCenter,QString::number(a)+"°");
     }
     // Horizon
-    p.setPen(QPen(QColor(50,120,190),2)); p.setBrush(Qt::NoBrush); p.drawEllipse(c,R,R);
+    p.setPen(QPen(QColor(34,211,238,150),2)); p.setBrush(Qt::NoBrush); p.drawEllipse(c,R,R);
     // Grid
-    p.setPen(QPen(QColor(30,70,110,80),1,Qt::DotLine));
+    p.setPen(QPen(QColor(255,255,255,28),1,Qt::DotLine));
     p.drawLine(QPointF(c.x(),c.y()-R),QPointF(c.x(),c.y()+R));
     p.drawLine(QPointF(c.x()-R,c.y()),QPointF(c.x()+R,c.y()));
     // Zenith Marker
-    p.setBrush(QColor(0,180,255,100)); p.setPen(QPen(QColor(0,180,255,180),1)); 
+    p.setBrush(QColor(34,211,238,110)); p.setPen(QPen(QColor(34,211,238,200),1));
     p.drawEllipse(c,3,3);
-    
+
     p.setFont(QFont("Inter",10,QFont::Bold));
     auto dc=[&](const QString&t,double az){
       double a=deg2rad(az),rr=R*1.10;QPointF pt(c.x()+rr*sin(a),c.y()-rr*cos(a));
-      QRectF b(pt.x()-14,pt.y()-10,28,20);p.fillRect(b.adjusted(-2,-2,2,2),QColor(6,10,18,200));
-      p.setPen(QColor(130,195,240));p.drawText(b,Qt::AlignCenter,t);
+      QRectF b(pt.x()-14,pt.y()-10,28,20);p.fillRect(b.adjusted(-2,-2,2,2),QColor(10,13,24,210));
+      p.setPen(QColor(233,236,245));p.drawText(b,Qt::AlignCenter,t); // --ink
     };
     dc("N",0);dc("E",90);dc("S",180);dc("W",270);
     if(alt_.size()>=2&&az_.size()==alt_.size()){
@@ -635,20 +679,21 @@ protected:
       };
       QPainterPath pp; pp.moveTo(toP(alt_[0],az_[0]));
       for(int i=1;i<alt_.size();i++)pp.lineTo(toP(alt_[i],az_[i]));
-      p.setPen(QPen(QColor(0,150,255,50),12,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));p.drawPath(pp);
-      p.setPen(QPen(QColor(0,190,255,120),6,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));p.drawPath(pp);
-      p.setPen(QPen(QColor(160,235,255),2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));p.drawPath(pp);
-      QPointF st=toP(alt_[0],az_[0]);p.setBrush(QColor(0,255,127));p.setPen(QPen(QColor(255,255,255,200),1.5));p.drawEllipse(st,5,5);
-      QPointF en=toP(alt_[alt_.size()-1],az_[alt_.size()-1]);p.setBrush(QColor(255,127,0));p.setPen(QPen(QColor(255,255,255,200),1.5));p.drawEllipse(en,5,5);
+      // plasma glow → bright core
+      p.setPen(QPen(QColor(34,211,238,55),12,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));p.drawPath(pp);
+      p.setPen(QPen(QColor(34,211,238,130),6,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));p.drawPath(pp);
+      p.setPen(QPen(QColor(190,245,255),2,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));p.drawPath(pp);
+      QPointF st=toP(alt_[0],az_[0]);p.setBrush(QColor(94,234,212));p.setPen(QPen(QColor(255,255,255,200),1.5));p.drawEllipse(st,5,5); // --aurora rise
+      QPointF en=toP(alt_[alt_.size()-1],az_[alt_.size()-1]);p.setBrush(QColor(245,180,0));p.setPen(QPen(QColor(255,255,255,200),1.5));p.drawEllipse(en,5,5); // --stellar set
     }
-    p.setFont(QFont("Inter",11,QFont::Bold));
-    QRectF tr(0,4,w,26);p.fillRect(tr,QColor(6,10,18,220));p.setPen(QColor(180,225,255));p.drawText(tr,Qt::AlignCenter,title_);
+    p.setFont(QFont("Space Grotesk",11,QFont::Bold));
+    QRectF tr(0,4,w,26);p.fillRect(tr,QColor(10,13,24,225));p.setPen(QColor(233,236,245));p.drawText(tr,Qt::AlignCenter,title_);
     if(!fovLabel_.isEmpty()){
-      p.setFont(QFont("Arial",9,QFont::Bold));QFontMetrics fm(p.font());
+      p.setFont(QFont("Inter",9,QFont::Bold));QFontMetrics fm(p.font());
       int tw=fm.horizontalAdvance(fovLabel_)+18,th=22;
       QRectF b(w-tw-8,h-th-8,tw,th);
-      p.fillRect(b,QColor(0,70,52,200));p.setPen(QPen(QColor(13,112,80),1));p.drawRoundedRect(b,4,4);
-      p.setPen(QColor(32,232,192));p.drawText(b,Qt::AlignCenter,fovLabel_);
+      p.setBrush(QColor(94,234,212,28));p.setPen(QPen(QColor(94,234,212,160),1));p.drawRoundedRect(b,8,8);
+      p.setPen(QColor(94,234,212));p.drawText(b,Qt::AlignCenter,fovLabel_); // --aurora
     }
   }
 private:
@@ -763,16 +808,16 @@ public:
 protected:
   void paintEvent(QPaintEvent*)override{
     QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
-    p.fillRect(rect(),QColor(6,10,18));
+    p.fillRect(rect(),QColor(10,13,24)); // --deep
     int W=width(),H=height();
     // Title bar
-    p.fillRect(0,0,W,26,QColor(6,10,18,230));
-    p.setFont(QFont("Arial",11,QFont::Bold));
-    p.setPen(QColor(180,225,255));
+    p.fillRect(0,0,W,26,QColor(10,13,24,235));
+    p.setFont(QFont("Space Grotesk",11,QFont::Bold));
+    p.setPen(QColor(233,236,245)); // --ink
     QString title=targetName_.isEmpty()?"Framing Diagram":targetName_+" — Framing (DSS2 Red)";
     p.drawText(QRectF(0,4,W,20),Qt::AlignCenter,title);
     if(!status_.isEmpty()){
-      p.setFont(QFont("Arial",10)); p.setPen(QColor(120,160,200));
+      p.setFont(QFont("Inter",10)); p.setPen(QColor(139,145,168)); // --ink-dim
       p.drawText(QRectF(0,26,W,H-26),Qt::AlignCenter,status_);
       return;
     }
@@ -788,9 +833,9 @@ protected:
       double cx=ox+scaled.width()/2.0, cy=oy+scaled.height()/2.0;
       double rw=fovW_*scX, rh=fovH_*scY;
       QRectF box(cx-rw/2,cy-rh/2,rw,rh);
-      // Glow
-      p.setPen(QPen(QColor(0,180,255,50),8)); p.setBrush(Qt::NoBrush); p.drawRect(box);
-      p.setPen(QPen(QColor(0,210,255,160),2)); p.drawRect(box);
+      // Glow (plasma)
+      p.setPen(QPen(QColor(34,211,238,55),8)); p.setBrush(Qt::NoBrush); p.drawRect(box);
+      p.setPen(QPen(QColor(34,211,238,170),2)); p.drawRect(box);
       // Corner ticks
       double cs=std::min(rw,rh)*0.10;
       p.setPen(QPen(QColor(255,255,255,210),2));
@@ -801,7 +846,7 @@ protected:
       tick(box.left(),box.top(),1,1); tick(box.right(),box.top(),-1,1);
       tick(box.left(),box.bottom(),1,-1); tick(box.right(),box.bottom(),-1,-1);
       // FOV label
-      p.setFont(QFont("Arial",8,QFont::Bold)); p.setPen(QColor(0,210,255));
+      p.setFont(QFont("Inter",8,QFont::Bold)); p.setPen(QColor(34,211,238)); // --plasma
       p.drawText(QRectF(box.left(),box.bottom()+3,rw,14),Qt::AlignHCenter,
         QString("%1' × %2'").arg(fovW_,0,'f',1).arg(fovH_,0,'f',1));
     }
@@ -817,12 +862,12 @@ protected:
       p.drawLine(QPointF(bx,by-4),QPointF(bx,by+4));
       p.drawLine(QPointF(bx+barPx,by-4),QPointF(bx+barPx,by+4));
       QString lbl=barAm>=1?QString("%1'").arg((int)barAm):QString("%1\"").arg((int)(barAm*60));
-      p.setFont(QFont("Arial",8)); p.setPen(QColor(200,200,200,200));
+      p.setFont(QFont("Inter",8)); p.setPen(QColor(233,236,245,210)); // --ink
       p.drawText(QRectF(bx,by-16,barPx,13),Qt::AlignHCenter,lbl);
     }
     // Bottom info bar
-    p.fillRect(0,H-18,W,18,QColor(6,10,18,220));
-    p.setFont(QFont("Arial",8)); p.setPen(QColor(90,140,190));
+    p.fillRect(0,H-18,W,18,QColor(10,13,24,225));
+    p.setFont(QFont("Inter",8)); p.setPen(QColor(139,145,168)); // --ink-dim
     p.drawText(QRectF(6,H-15,W-12,13),Qt::AlignLeft,
       QString("Context: %1'×%1'  |  Survey: DSS2 Red (multi-source)").arg(reqSizeArcmin_,0,'f',0));
   }
@@ -844,17 +889,21 @@ public:
     :QDialog(parent),editProfiles_(cfg.gearProfiles),activeIdx_(cfg.activeProfile){
     setWindowTitle("Equipment Profiles");
     resize(820,560);
-    const QString es="QWidget{background:#07101c;color:#b8d0e8;}"
-      "QLineEdit,QDoubleSpinBox,QSpinBox,QComboBox{background:#0b1828;color:#c8e0f8;border:1px solid #1a4060;border-radius:4px;padding:3px 6px;}"
-      "QCheckBox{color:#90b8d4;spacing:6px;}"
-      "QCheckBox::indicator{width:14px;height:14px;border:1px solid #1a4a6a;border-radius:3px;background:#0b1828;}"
-      "QCheckBox::indicator:checked{background:#0a7acc;border-color:#00aeff;}"
-      "QPushButton{background:#0e2035;color:#60c8f0;border:1px solid #1a4060;border-radius:4px;padding:4px 10px;}"
-      "QPushButton:hover{background:#1a3050;border-color:#2a6090;}"
-      "QListWidget{background:#080e18;color:#b8d0e8;border:1px solid #1a3650;border-radius:4px;}"
-      "QListWidget::item:selected{background:#1a3a5a;color:#e0f0ff;}"
-      "QLabel{color:#90b0cc;}"
-      "QScrollArea{border:none;}";
+    const QString es=theme::sub(
+      "QWidget{background:@deep@;color:@ink@;}"
+      "QLineEdit,QDoubleSpinBox,QSpinBox,QComboBox{background:rgba(255,255,255,0.04);color:@ink@;border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:4px 8px;}"
+      "QLineEdit:focus,QDoubleSpinBox:focus,QSpinBox:focus,QComboBox:focus{border-color:@plasma@;}"
+      "QComboBox QAbstractItemView{background:@panel@;color:@ink@;border:1px solid rgba(255,255,255,0.07);selection-background-color:rgba(34,211,238,0.18);selection-color:@plasma@;}"
+      "QCheckBox{color:@ink@;spacing:7px;}"
+      "QCheckBox::indicator{width:15px;height:15px;border:1px solid rgba(255,255,255,0.10);border-radius:4px;background:rgba(255,255,255,0.04);}"
+      "QCheckBox::indicator:checked{background:@plasma@;border-color:@plasma@;}"
+      "QPushButton{background:rgba(255,255,255,0.04);color:@ink@;border:1px solid rgba(255,255,255,0.10);border-radius:10px;padding:6px 14px;font-weight:600;}"
+      "QPushButton:hover{background:rgba(34,211,238,0.06);border-color:@plasma@;color:@plasma@;}"
+      "QListWidget{background:@void@;color:@ink@;border:1px solid rgba(255,255,255,0.07);border-radius:10px;}"
+      "QListWidget::item{padding:7px 10px;border-radius:6px;margin:1px 2px;}"
+      "QListWidget::item:selected{background:rgba(34,211,238,0.14);color:@plasma@;}"
+      "QLabel{color:@inkdim@;}"
+      "QScrollArea{border:none;}");
     setStyleSheet(es);
 
     // Left: profile list
@@ -867,7 +916,7 @@ public:
     auto* leftW=new QWidget; auto* leftV=new QVBoxLayout(leftW);
     leftV->setContentsMargins(0,0,4,0);
     auto* listTitleLbl=new QLabel("Saved Profiles");
-    listTitleLbl->setStyleSheet("color:#60c8f0;font-weight:bold;padding:0 0 4px 0;");
+    listTitleLbl->setStyleSheet(theme::sub("color:@plasma@;font-family:@display@;font-weight:600;padding:0 0 4px 0;"));
     leftV->addWidget(listTitleLbl);
     leftV->addWidget(profileList_,1);
     leftV->addLayout(btnRow);
@@ -882,7 +931,7 @@ public:
     widthEdit_=new QSpinBox; widthEdit_->setRange(100,20000); widthEdit_->setSuffix(" px");
     heightEdit_=new QSpinBox; heightEdit_->setRange(100,20000); heightEdit_->setSuffix(" px");
     fovLbl_=new QLabel("FOV: —");
-    fovLbl_->setStyleSheet("color:#20e8c0;font-weight:bold;padding:4px 10px;background:rgba(0,60,40,0.5);border:1px solid #0a5030;border-radius:4px;");
+    fovLbl_->setStyleSheet(theme::sub("color:@aurora@;font-weight:600;padding:4px 12px;background:rgba(94,234,212,0.08);border:1px solid rgba(94,234,212,0.45);border-radius:999px;"));
     lrgbCk_=new QCheckBox("LRGB"); haCk_=new QCheckBox("Hα");
     oiiiCk_=new QCheckBox("OIII"); siiCk_=new QCheckBox("SII");
 
@@ -901,7 +950,7 @@ public:
     // Build form grid
     auto mkSep=[](const QString& t)->QLabel*{
       auto* l=new QLabel(t);
-      l->setStyleSheet("color:#60c8f0;font-weight:bold;padding:6px 0 2px 0;border-bottom:1px solid #1a3650;");
+      l->setStyleSheet(theme::sub("color:@plasma@;font-family:@display@;font-weight:600;padding:6px 0 2px 0;border-bottom:1px solid rgba(255,255,255,0.07);"));
       return l;
     };
     auto* formW=new QWidget;
@@ -1423,14 +1472,14 @@ protected:
     }
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        p.fillRect(rect(), QColor(8,12,20));
+        p.fillRect(rect(), QColor(10,13,24)); // --deep
         if (!pixmap_.isNull()) {
             QSize sc = pixmap_.size().scaled(size(), Qt::KeepAspectRatio);
             QPoint off((width()-sc.width())/2, (height()-sc.height())/2);
             p.drawPixmap(QRect(off,sc), pixmap_, pixmap_.rect());
         }
-        if (!title_.isEmpty()) drawBox(p, {title_}, 10, 10, {255,255,255});
-        if (!hudLines_.isEmpty()) drawBox(p, hudLines_, 10, 46, {180,220,255});
+        if (!title_.isEmpty()) drawBox(p, {title_}, 10, 10, QColor(233,236,245)); // --ink
+        if (!hudLines_.isEmpty()) drawBox(p, hudLines_, 10, 46, QColor(94,234,212)); // --aurora
         if (!statsLine_.isEmpty()) {
             QStringList bt = { statsLine_,
                 "← h p: prev    → l n: next    s: stretch    x Del: delete (permanent)" };
@@ -1461,7 +1510,12 @@ private:
 class FitsReviewerPanel : public QWidget {
     Q_OBJECT
 public:
-    explicit FitsReviewerPanel(QWidget* parent=nullptr) : QWidget(parent) { setupUI(); }
+    explicit FitsReviewerPanel(QWidget* parent=nullptr) : QWidget(parent) {
+        setupUI();
+        // Prefill the last folder we successfully opened (user still clicks Open).
+        const QString last = QSettings().value("reviewer/lastFolder").toString();
+        if (!last.isEmpty() && QDir(last).exists()) folderEdit_->setText(last);
+    }
 
 private:
     void setupUI() {
@@ -1478,13 +1532,9 @@ private:
         auto* openBtn = new QPushButton("Open");
         openBtn->setFixedWidth(70); openBtn->setMinimumHeight(32);
         autoReviewBtn_ = new QPushButton("⚡ Auto Review…");
+        autoReviewBtn_->setObjectName("scan");
         autoReviewBtn_->setMinimumHeight(32);
         autoReviewBtn_->setToolTip("Scan all loaded frames: delete out-of-focus, star trails and frames with <10 stars");
-        autoReviewBtn_->setStyleSheet(
-            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1a5c30,stop:1 #0e3a1e);"
-            "color:#80ffaa;border:1px solid #2a8040;border-radius:5px;font-weight:bold;padding:4px 14px;}"
-            "QPushButton:hover{background:#1e7038;color:#ccffdd;border-color:#40c060;}"
-            "QPushButton:disabled{background:#0c1a10;color:#2a5030;border-color:#1a2a1a;}");
         folderRow->addWidget(new QLabel("Folder:"));
         folderRow->addWidget(folderEdit_,1);
         folderRow->addWidget(browseBtn);
@@ -1498,10 +1548,10 @@ private:
         auto* lv = new QVBoxLayout(leftPanel);
         lv->setSpacing(4); lv->setContentsMargins(0,0,0,0);
         statusLbl_ = new QLabel("No folder open");
-        statusLbl_->setStyleSheet("QLabel{color:#5a90b0;font-style:italic;padding:2px;}");
+        statusLbl_->setStyleSheet(theme::sub("QLabel{color:@inkdim@;font-style:italic;padding:2px;}"));
         fileList_ = new QListWidget;
         fileList_->setMinimumWidth(220); fileList_->setMaximumWidth(320);
-        fileList_->setAlternatingRowColors(true); fileList_->setSpacing(1);
+        fileList_->setAlternatingRowColors(false); fileList_->setSpacing(1);
         lv->addWidget(statusLbl_);
         lv->addWidget(fileList_,1);
         viewer_ = new FitsViewerWidget;
@@ -1519,17 +1569,16 @@ private:
         prevBtn->setMinimumHeight(36); nextBtn->setMinimumHeight(36);
         // vertical separator
         auto* sep = new QFrame; sep->setFrameShape(QFrame::VLine);
-        sep->setStyleSheet("QFrame{color:#1a3a5a;max-width:2px;}");
+        sep->setStyleSheet("QFrame{color:rgba(255,255,255,0.10);max-width:2px;}");
         auto* strLbl = new QLabel("Stretch:");
-        strLbl->setStyleSheet("QLabel{color:#60c8f0;font-weight:bold;padding:0 4px;}");
+        strLbl->setStyleSheet(theme::sub("QLabel{color:@plasma@;font-family:@display@;font-weight:600;padding:0 4px;}"));
         stretchCombo_ = new QComboBox;
         stretchCombo_->addItems({"linear","sqrt","log","asinh"});
         stretchCombo_->setFixedWidth(110); stretchCombo_->setMinimumHeight(36);
         stretchCombo_->setToolTip("s — cycle stretch mode");
         auto* delBtn = new QPushButton("Delete File");
+        delBtn->setObjectName("danger");
         delBtn->setMinimumHeight(36); delBtn->setFixedWidth(160);
-        delBtn->setStyleSheet("QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #7a1818,stop:1 #5a1010);color:#ffaaaa;border:1px solid #aa3030;padding:6px 14px;border-radius:5px;font-weight:bold;}"
-                              "QPushButton:hover{background:#8a2020;color:#ffcccc;}");
         delBtn->setToolTip("x / Del — permanently delete current file");
         ctrlRow->addWidget(prevBtn);
         ctrlRow->addWidget(nextBtn);
@@ -1590,6 +1639,7 @@ private:
             viewer_->clearAll(); fileList_->clear(); return;
         }
         statusLbl_->setText(QString("%1 FITS files — click or use arrow keys").arg(files_.size()));
+        QSettings().setValue("reviewer/lastFolder", folder);
         fileList_->clear();
         QDir rootDir(folder);
         for (const auto& f : files_)
@@ -1720,12 +1770,12 @@ private:
 
         auto* hdr = new QLabel(
             QString("%1 file%2 flagged.  "
-                    "<span style='color:#ff6060'>Red = delete suggested (score &lt;50)</span>,  "
-                    "<span style='color:#ffd060'>yellow = tolerable (score 50–69)</span>.  "
+                    "<span style='color:#f47272'>Red = delete suggested (score &lt;50)</span>,  "
+                    "<span style='color:#f5b400'>gold = tolerable (score 50–69)</span>.  "
                     "Uncheck to keep.")
                 .arg(flagged.size()).arg(flagged.size()==1?"":"s"));
         hdr->setTextFormat(Qt::RichText);
-        hdr->setStyleSheet("QLabel{font-size:9pt;padding:6px 4px;}");
+        hdr->setStyleSheet(theme::sub("QLabel{color:@ink@;font-size:9pt;padding:6px 4px;}"));
         vl->addWidget(hdr);
 
         if (calibCount)
@@ -1733,7 +1783,7 @@ private:
                 .arg(calibCount).arg(calibCount==1?"":"s")));
 
         auto* list = new QListWidget;
-        list->setAlternatingRowColors(true);
+        list->setAlternatingRowColors(false);
         list->setSpacing(1);
         for (const auto& item : flagged) {
             QString label = QString("[score %1 | %2 star%3]  %4  —  %5")
@@ -1745,24 +1795,21 @@ private:
             auto* li = new QListWidgetItem(label, list);
             li->setData(Qt::UserRole, item.path);
             if (item.deleteSuggested) {
-                // score < 50: pre-checked, red
+                // score < 50: pre-checked, danger red
                 li->setCheckState(Qt::Checked);
-                li->setForeground(QColor(255, 100, 100));
+                li->setForeground(QColor(0xf4, 0x72, 0x72));
             } else {
-                // score 50-69: unchecked (tolerable), yellow
+                // score 50-69: unchecked (tolerable), stellar gold
                 li->setCheckState(Qt::Unchecked);
-                li->setForeground(QColor(255, 208, 80));
+                li->setForeground(QColor(0xf5, 0xb4, 0x00));
             }
         }
         vl->addWidget(list, 1);
 
         auto* btnRow = new QHBoxLayout;
         auto* delBtn = new QPushButton(QString("Delete Checked (%1)").arg(deleteCount));
+        delBtn->setObjectName("danger");
         delBtn->setEnabled(deleteCount > 0);
-        delBtn->setStyleSheet(
-            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #7a1818,stop:1 #5a1010);"
-            "color:#ffaaaa;border:1px solid #aa3030;border-radius:5px;padding:6px 18px;font-weight:bold;}"
-            "QPushButton:hover{background:#8a2020;color:#ffcccc;}");
         auto* cancelBtn = new QPushButton("Cancel");
         btnRow->addWidget(delBtn);
         btnRow->addStretch(1);
@@ -1832,15 +1879,8 @@ private:
 };
 
 // ============================================================
-// Tools — Sort FITS (C++ using cfitsio, replaces sort_multiday.sh)
+// FITS metadata helpers (cfitsio) — shared by the Arrange panel
 // ============================================================
-struct SortJob {
-    QString source, destination, rejectFile;
-    bool dryRun = false;
-    bool splitByExp = false;
-};
-struct SortProgress { QString message; bool isError = false; };
-
 struct FitsBasicMeta { QString obj, filter; float exptime = -1.0f; };
 
 static FitsBasicMeta readFitsObjFilter(const QString& path)
@@ -1942,608 +1982,6 @@ static bool dimMatch(int w1, int h1, int w2, int h2) {
     return w1==w2 && h1==h2;
 }
 
-class SortFitsPanel : public QWidget {
-    Q_OBJECT
-public:
-    explicit SortFitsPanel(QWidget* parent=nullptr) : QWidget(parent) {
-        auto* vbox = new QVBoxLayout(this);
-        vbox->setSpacing(8); vbox->setContentsMargins(8,8,8,8);
-
-        auto row = [&](const QString& lbl, QLineEdit*& edit, QPushButton*& btn){
-            auto* h = new QHBoxLayout;
-            auto* l = new QLabel(lbl); l->setFixedWidth(110);
-            edit = new QLineEdit; edit->setMinimumHeight(30);
-            btn  = new QPushButton("Browse…"); btn->setFixedWidth(90); btn->setMinimumHeight(30);
-            h->addWidget(l); h->addWidget(edit,1); h->addWidget(btn);
-            vbox->addLayout(h);
-        };
-
-        QPushButton *bSrc,*bDst,*bRej;
-        row("Source folder:", srcEdit_, bSrc);
-        row("Destination:",   dstEdit_, bDst);
-        row("Reject file (opt):", rejEdit_, bRej);
-        bRej->setText("Pick file…");
-
-        auto* optRow = new QHBoxLayout;
-        dryChk_ = new QCheckBox("Dry run (simulate, no copy)");
-        dryChk_->setToolTip("Shows what would happen without copying any files");
-        splitExpChk_ = new QCheckBox("Split by exposure time");
-        splitExpChk_->setToolTip("Create subfolders per exposure time: Object/Filter/300s/");
-        optRow->addWidget(dryChk_); optRow->addWidget(splitExpChk_); optRow->addStretch(1);
-        auto* runBtn = new QPushButton("Sort FITS by Object / Filter");
-        runBtn->setMinimumHeight(36);
-        runBtn->setStyleSheet("QPushButton{font-weight:bold;font-size:10pt;}");
-        optRow->addWidget(runBtn);
-        vbox->addLayout(optRow);
-
-        log_ = new QPlainTextEdit;
-        log_->setReadOnly(true);
-        log_->setFont(QFont("Monospace",9));
-        log_->setStyleSheet("QPlainTextEdit{background:#060e18;color:#b8d0e8;"
-                            "border:1px solid #1a3650;border-radius:5px;}");
-        vbox->addWidget(log_,1);
-
-        connect(bSrc, &QPushButton::clicked, this, [this](){
-            QString d=QFileDialog::getExistingDirectory(this,"Source folder",srcEdit_->text());
-            if(!d.isEmpty())srcEdit_->setText(d); });
-        connect(bDst, &QPushButton::clicked, this, [this](){
-            QString d=QFileDialog::getExistingDirectory(this,"Destination folder",dstEdit_->text());
-            if(!d.isEmpty())dstEdit_->setText(d); });
-        connect(bRej, &QPushButton::clicked, this, [this](){
-            QString f=QFileDialog::getOpenFileName(this,"Reject list",rejEdit_->text(),"Text (*.txt);;All (*)");
-            if(!f.isEmpty())rejEdit_->setText(f); });
-        connect(runBtn, &QPushButton::clicked, this, &SortFitsPanel::runSort);
-    }
-
-private slots:
-    void runSort() {
-        SortJob job;
-        job.source      = srcEdit_->text().trimmed();
-        job.destination = dstEdit_->text().trimmed();
-        job.rejectFile  = rejEdit_->text().trimmed();
-        job.dryRun      = dryChk_->isChecked();
-        job.splitByExp  = splitExpChk_->isChecked();
-
-        if (job.source.isEmpty()||!QDir(job.source).exists()) {
-            QMessageBox::warning(this,"Source","Select a valid source folder."); return;
-        }
-        if (job.destination.isEmpty()) {
-            QMessageBox::warning(this,"Destination","Select a destination folder."); return;
-        }
-        log_->clear();
-        log_->appendPlainText(job.dryRun ? "[DRY RUN] No files will be copied.\n" : "Starting sort…\n");
-
-        QSet<QString> rejects;
-        if (!job.rejectFile.isEmpty() && QFile::exists(job.rejectFile)) {
-            QFile rf(job.rejectFile); if(rf.open(QIODevice::ReadOnly)){
-                QTextStream ts(&rf);
-                while(!ts.atEnd()){ QString l=ts.readLine().trimmed(); if(!l.isEmpty())rejects.insert(QFileInfo(l).fileName()); }
-            }
-            log_->appendPlainText(QString("Loaded %1 rejected filenames.\n").arg(rejects.size()));
-        }
-
-        // Collect FITS files
-        QDir srcDir(job.source);
-        QStringList filters={"*.fit","*.fits","*.fts","*.FIT","*.FITS","*.FTS"};
-        QFileInfoList allFiles;
-        // recursive
-        QDirIterator it(job.source, filters, QDir::Files, QDirIterator::Subdirectories);
-        while(it.hasNext()){ it.next(); allFiles.append(it.fileInfo()); }
-        std::sort(allFiles.begin(),allFiles.end(),[](const QFileInfo&a,const QFileInfo&b){return a.absoluteFilePath()<b.absoluteFilePath();});
-
-        log_->appendPlainText(QString("Found %1 FITS file(s).\n").arg(allFiles.size()));
-        if(allFiles.isEmpty()) return;
-
-        // CSV log
-        QDir().mkpath(job.destination);
-        QString csvPath = job.destination + "/sort_log.csv";
-        QFile csvFile(csvPath);
-        bool csvOk = !job.dryRun && csvFile.open(QIODevice::WriteOnly|QIODevice::Text);
-        QTextStream csv; if(csvOk) csv.setDevice(&csvFile);
-        if(csvOk) csv << "SourceFile,FileName,OBJECT,FILTER,Destination,Status\n";
-
-        int copied=0, rejected=0, errors=0;
-
-        auto logLine = [this](const QString& s){ log_->appendPlainText(s); QApplication::processEvents(); };
-
-        for(const QFileInfo& fi : allFiles){
-            const QString path = fi.absoluteFilePath();
-            const QString fname = fi.fileName();
-            logLine(QString("Processing: %1").arg(fname));
-
-            auto meta = readFitsObjFilter(path);
-            QString safeObj=safeName(meta.obj), safeFlt=safeName(meta.filter);
-            QString expSub = job.splitByExp ? "/" + expFolder(meta.exptime) : "";
-
-            bool isReject = rejects.contains(fname);
-            QString destDir = isReject
-                ? job.destination+"/rejected/"+safeObj+"/"+safeFlt+expSub
-                : job.destination+"/"+safeObj+"/"+safeFlt+expSub;
-            QString destFile = destDir+"/"+fname;
-
-            // handle duplicate
-            if(QFile::exists(destFile)){
-                QString stem=fi.completeBaseName(), ext=fi.suffix();
-                destFile=destDir+"/"+stem+"_"+QString::number(QDateTime::currentMSecsSinceEpoch())+"."+ext;
-            }
-
-            QString status = isReject?"Rejected":"Copied";
-            logLine(QString("  -> [%1] %2/%3%4/").arg(status,safeObj,safeFlt,expSub));
-
-            if(!job.dryRun){
-                QDir().mkpath(destDir);
-                if(!QFile::copy(path,destFile)){
-                    logLine(QString("  ERROR: copy failed for %1").arg(fname));
-                    errors++; status="Error";
-                }
-            }
-
-            if(isReject)rejected++;else copied++;
-            if(csvOk) csv<<"\""<<path<<"\"" <<","<< "\""<<fname<<"\"" <<","<< "\""<<meta.obj<<"\"" <<","<< "\""<<meta.filter<<"\"" <<","<< "\""<<destFile<<"\"" <<","<< "\""<<status<<"\"\n";
-        }
-
-        if(csvOk){ csvFile.close(); logLine("Log: "+csvPath); }
-        logLine(QString("\n--- Summary ---\nCopied: %1\nRejected: %2\nErrors: %3").arg(copied).arg(rejected).arg(errors));
-        if(job.dryRun) logLine("[DRY RUN complete — no files were actually copied]");
-    }
-
-private:
-    QLineEdit    *srcEdit_=nullptr, *dstEdit_=nullptr, *rejEdit_=nullptr;
-    QCheckBox    *dryChk_=nullptr, *splitExpChk_=nullptr;
-    QPlainTextEdit *log_=nullptr;
-};
-
-// ============================================================
-// Tools — Siril Stack Panel
-// ============================================================
-class SirilStackPanel : public QWidget {
-    Q_OBJECT
-
-    // Holds everything needed to stack one group — built during runStack() prep phase
-    struct StackGroup {
-        QString groupDir;    // session/GroupName  (calib subfolders + process/ go here)
-        QString lightsPath;  // original sorted lights folder — Siril reads directly, no copy
-        float   darkScale = 1.0f;
-        bool    hasCalib  = false;
-    };
-
-public:
-    explicit SirilStackPanel(QWidget* parent=nullptr) : QWidget(parent) {
-        auto* vbox = new QVBoxLayout(this);
-        vbox->setSpacing(8); vbox->setContentsMargins(8,8,8,8);
-
-        auto makeRow = [&](const QString& lbl, QLineEdit*& edit, QPushButton*& btn, QVBoxLayout* target, int lw=150){
-            auto* h = new QHBoxLayout;
-            auto* l = new QLabel(lbl); l->setFixedWidth(lw);
-            edit = new QLineEdit; edit->setMinimumHeight(30);
-            btn  = new QPushButton("Browse…"); btn->setFixedWidth(90); btn->setMinimumHeight(30);
-            h->addWidget(l); h->addWidget(edit,1); h->addWidget(btn);
-            target->addLayout(h);
-        };
-
-        QPushButton *bLights, *bSess;
-        makeRow("Sorted lights folder:", lightsEdit_, bLights, vbox);
-        makeRow("Session output folder:", sessionEdit_, bSess, vbox);
-
-        // Calibration group
-        auto* calibGrp = new QGroupBox("Calibration frames  (optional — leave blank to skip)");
-        calibGrp->setStyleSheet("QGroupBox{font-weight:bold;color:#60c8f0;border:1px solid #1a4a6a;"
-                                "border-radius:6px;margin-top:8px;padding-top:6px;}"
-                                "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}");
-        auto* cg = new QVBoxLayout(calibGrp);
-        cg->setSpacing(6); cg->setContentsMargins(8,10,8,8);
-
-        auto makeCalibRow = [&](const QString& lbl, QLineEdit*& edit, QPushButton*& btn){
-            auto* h = new QHBoxLayout;
-            auto* l = new QLabel(lbl); l->setFixedWidth(110);
-            edit = new QLineEdit; edit->setMinimumHeight(28);
-            edit->setPlaceholderText("optional — leave blank to skip");
-            btn  = new QPushButton("Browse…"); btn->setFixedWidth(90); btn->setMinimumHeight(28);
-            auto* clr = new QPushButton("✕"); clr->setFixedWidth(28); clr->setMinimumHeight(28);
-            clr->setToolTip("Clear");
-            clr->setStyleSheet("QPushButton{padding:0;font-size:9pt;background:#0c1828;color:#aa4040;"
-                               "border:1px solid #2a1a1a;border-radius:3px;}"
-                               "QPushButton:hover{background:#1a0808;color:#ff6060;}");
-            QLineEdit* ep = edit;
-            connect(clr, &QPushButton::clicked, this, [ep](){ ep->clear(); });
-            h->addWidget(l); h->addWidget(edit,1); h->addWidget(btn); h->addWidget(clr);
-            cg->addLayout(h);
-        };
-
-        QPushButton *bBias, *bDark, *bFlat;
-        makeCalibRow("Biases folder:", biasEdit_, bBias);
-        makeCalibRow("Darks folder:",  darkEdit_, bDark);
-        makeCalibRow("Flats folder:",  flatEdit_, bFlat);
-        vbox->addWidget(calibGrp);
-
-        // Stack options
-        auto* h3 = new QHBoxLayout;
-        auto* lm = new QLabel("Stack method:"); lm->setFixedWidth(105);
-        methodCombo_ = new QComboBox;
-        methodCombo_->addItems({"rej","average","median","winsorized","linear"});
-        methodCombo_->setMinimumHeight(30); methodCombo_->setFixedWidth(130);
-        auto* ln = new QLabel("Norm:"); ln->setFixedWidth(45);
-        normCombo_ = new QComboBox;
-        normCombo_->addItems({"addscale","mulscale","addoffset","no"});
-        normCombo_->setMinimumHeight(30); normCombo_->setFixedWidth(130);
-        auto* lsig = new QLabel("Sigma lo/hi:"); lsig->setFixedWidth(90);
-        lsig->setStyleSheet("QLabel{color:#60c8f0;font-weight:bold;padding:0 4px;}");
-        sigLowEdit_  = new QLineEdit("3"); sigLowEdit_->setFixedWidth(42); sigLowEdit_->setMinimumHeight(30);
-        sigHighEdit_ = new QLineEdit("3"); sigHighEdit_->setFixedWidth(42); sigHighEdit_->setMinimumHeight(30);
-        sigLowEdit_->setToolTip("Sigma low for rejection stacking (default 3)");
-        sigHighEdit_->setToolTip("Sigma high for rejection stacking (default 3)");
-        auto* slash = new QLabel("/"); slash->setFixedWidth(10);
-        h3->addWidget(lm); h3->addWidget(methodCombo_);
-        h3->addSpacing(10); h3->addWidget(ln); h3->addWidget(normCombo_);
-        h3->addSpacing(10); h3->addWidget(lsig); h3->addWidget(sigLowEdit_);
-        h3->addWidget(slash); h3->addWidget(sigHighEdit_);
-        h3->addStretch(1);
-        vbox->addLayout(h3);
-
-        // Action buttons — single Stack button, no separate Prepare step
-        auto* h4 = new QHBoxLayout; h4->setSpacing(8);
-        auto* runBtn = new QPushButton("▶▶  Stack with Siril");
-        runBtn->setMinimumHeight(38); runBtn->setMinimumWidth(210);
-        runBtn->setToolTip("Match calibration frames, generate Siril scripts and run stacking in one step.\n"
-                           "Light frames are read directly — no intermediate copy needed.");
-        runBtn->setStyleSheet("QPushButton{font-weight:bold;font-size:10pt;background:"
-                              "qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #0e5a28,stop:1 #093d1a);"
-                              "color:#80ffb0;border:1px solid #1a8040;}"
-                              "QPushButton:hover{background:#147830;color:#b0ffd0;}");
-        killBtn_ = new QPushButton("Stop");
-        killBtn_->setMinimumHeight(38); killBtn_->setFixedWidth(80);
-        killBtn_->setEnabled(false);
-        killBtn_->setStyleSheet("QPushButton{background:#7a1818;color:#ffaaaa;border:1px solid #aa3030;border-radius:5px;}"
-                                "QPushButton:hover{background:#8a2020;}");
-        h4->addStretch(1); h4->addWidget(runBtn); h4->addWidget(killBtn_);
-        vbox->addLayout(h4);
-
-        log_ = new QPlainTextEdit;
-        log_->setReadOnly(true);
-        log_->setFont(QFont("Monospace",9));
-        log_->setStyleSheet("QPlainTextEdit{background:#060e18;color:#b8d0e8;"
-                            "border:1px solid #1a3650;border-radius:5px;}");
-        vbox->addWidget(log_,1);
-
-        // Browse connections
-        auto browse = [this](QLineEdit* e, const QString& title){
-            QString d=QFileDialog::getExistingDirectory(this,title,e->text());
-            if(!d.isEmpty()) e->setText(d);
-        };
-        connect(bLights, &QPushButton::clicked, this, [this,browse](){ browse(lightsEdit_,"Sorted lights folder"); });
-        connect(bSess,   &QPushButton::clicked, this, [this,browse](){ browse(sessionEdit_,"Session output folder"); });
-        connect(bBias,   &QPushButton::clicked, this, [this,browse](){ browse(biasEdit_,"Biases calibration folder"); });
-        connect(bDark,   &QPushButton::clicked, this, [this,browse](){ browse(darkEdit_,"Darks calibration folder"); });
-        connect(bFlat,   &QPushButton::clicked, this, [this,browse](){ browse(flatEdit_,"Flats calibration folder"); });
-        connect(runBtn,  &QPushButton::clicked, this, &SirilStackPanel::runStack);
-        connect(killBtn_,&QPushButton::clicked, this, &SirilStackPanel::stopStack);
-    }
-
-private slots:
-    void runStack() {
-        QString lightsRoot = lightsEdit_->text().trimmed();
-        QString session    = sessionEdit_->text().trimmed();
-        if (lightsRoot.isEmpty()||!QDir(lightsRoot).exists()) {
-            QMessageBox::warning(this,"Lights","Select a valid sorted lights folder."); return;
-        }
-        if (session.isEmpty()) {
-            QMessageBox::warning(this,"Session","Select a session output folder."); return;
-        }
-
-        QString sirilBin;
-        for (const QString c : {"siril-cli","siril"}) {
-            QProcess p; p.start("which",{c}); p.waitForFinished(3000);
-            if (p.exitCode()==0) { sirilBin=c; break; }
-        }
-        if (sirilBin.isEmpty()) {
-            QMessageBox::critical(this,"Siril Not Found",
-                "siril-cli not found in PATH.\nInstall from https://siril.org"); return;
-        }
-
-        QDir().mkpath(session);
-        log_->clear();
-        auto logLine = [this](const QString& s){
-            log_->appendPlainText(s); QApplication::processEvents();
-        };
-        logLine("=== Stack with Siril ===");
-        logLine("Lights: " + lightsRoot);
-        logLine("Session: " + session);
-        logLine("Siril: " + sirilBin + "\n");
-
-        // Load calibration metadata
-        auto loadCalibDir = [&](const QString& dir) -> QVector<CalibMeta> {
-            QVector<CalibMeta> v;
-            if (dir.isEmpty()||!QDir(dir).exists()) return v;
-            QDirIterator it(dir, kFitsExts(), QDir::Files, QDirIterator::Subdirectories);
-            while (it.hasNext()) { it.next(); v.append(readCalibMeta(it.filePath())); }
-            logLine(QString("  Loaded %1 calib frames from: %2").arg(v.size()).arg(QFileInfo(dir).fileName()));
-            return v;
-        };
-        QVector<CalibMeta> biases = loadCalibDir(biasEdit_->text().trimmed());
-        QVector<CalibMeta> darks  = loadCalibDir(darkEdit_->text().trimmed());
-        QVector<CalibMeta> flats  = loadCalibDir(flatEdit_->text().trimmed());
-
-        // Discover light groups: Object/Filter/*.fit  OR  Filter/*.fit
-        struct LightGroup { QString object, filter, srcPath; QFileInfoList files; };
-        QVector<LightGroup> groups;
-        QDir rootDir(lightsRoot);
-        for (const auto& l1 : rootDir.entryInfoList(QDir::Dirs|QDir::NoDotAndDotDot,QDir::Name)) {
-            QDir l1dir(l1.absoluteFilePath());
-            auto directFits = l1dir.entryInfoList(kFitsExts(), QDir::Files);
-            if (!directFits.isEmpty()) {
-                groups.append({"_all_", l1.fileName(), l1.absoluteFilePath(), directFits});
-            } else {
-                for (const auto& l2 : l1dir.entryInfoList(QDir::Dirs|QDir::NoDotAndDotDot,QDir::Name)) {
-                    auto fits = QDir(l2.absoluteFilePath()).entryInfoList(kFitsExts(), QDir::Files);
-                    if (!fits.isEmpty())
-                        groups.append({l1.fileName(), l2.fileName(), l2.absoluteFilePath(), fits});
-                }
-            }
-        }
-        if (groups.isEmpty()) {
-            logLine("ERROR: No FITS light groups found.\n"
-                    "Expected: SortedRoot/Object/Filter/*.fit  or  SortedRoot/Filter/*.fit");
-            return;
-        }
-        logLine(QString("Found %1 light group(s):\n").arg(groups.size()));
-
-        stackGroups_.clear();
-        for (const auto& g : groups) {
-            QString groupName = safeName(g.object=="_all_" ? g.filter : g.object+"_"+g.filter);
-            logLine(QString("--- %1 (%2 files) ---").arg(groupName).arg(g.files.size()));
-
-            // Pick dominant exposure time when mixed — cache metadata to avoid redundant FITS I/O
-            QMap<int,QFileInfoList> byExp;
-            QHash<QString,CalibMeta> metaCache;
-            for (const auto& fi : g.files) {
-                CalibMeta m = readCalibMeta(fi.absoluteFilePath());
-                metaCache[fi.absoluteFilePath()] = m;
-                int key = (m.exptime>0) ? (int)std::round(m.exptime*10.0f) : 0;
-                byExp[key].append(fi);
-            }
-            QFileInfoList chosenFiles;
-            if (byExp.size()==1) {
-                chosenFiles = byExp.first();
-            } else {
-                logLine("  Multiple exposure times:");
-                for (auto it=byExp.begin(); it!=byExp.end(); ++it)
-                    logLine(QString("    %1s -> %2 files").arg(it.key()/10.0f,0,'f',1).arg(it.value().size()));
-                auto bestIt = std::max_element(byExp.begin(), byExp.end(),
-                    [](const QFileInfoList& a, const QFileInfoList& b){ return a.size() < b.size(); });
-                chosenFiles = bestIt.value();
-                logLine(QString("  -> Using dominant exposure %1s (%2 files)")
-                    .arg(bestIt.key()/10.0f,0,'f',1).arg(bestIt.value().size()));
-            }
-
-            CalibMeta rep = metaCache.value(chosenFiles.first().absoluteFilePath());
-            QString groupDir = session + "/" + groupName;
-            QDir().mkpath(groupDir + "/process");
-
-            StackGroup sg;
-            sg.groupDir   = groupDir;
-            sg.lightsPath = g.srcPath;   // Siril reads lights directly — no copy
-
-            // Match & copy biases
-            if (!biases.isEmpty()) {
-                QVector<CalibMeta> m;
-                for (const auto& b:biases)
-                    if (gainMatch(b.gain,rep.gain) && dimMatch(b.naxis1,b.naxis2,rep.naxis1,rep.naxis2))
-                        m.append(b);
-                if (!m.isEmpty()) {
-                    QDir().mkpath(groupDir+"/biases");
-                    for (const auto& b:m) QFile::copy(b.path, groupDir+"/biases/"+QFileInfo(b.path).fileName());
-                    logLine(QString("  Biases: matched %1/%2").arg(m.size()).arg(biases.size()));
-                    sg.hasCalib = true;
-                } else {
-                    logLine(QString("  Biases: no gain match (light gain=%1)").arg(rep.gain,0,'f',1));
-                }
-            }
-
-            // Match & copy darks (relax exposure if needed) — single pass
-            if (!darks.isEmpty()) {
-                QVector<CalibMeta> m, mRelaxed;
-                for (const auto& d:darks) {
-                    if (gainMatch(d.gain,rep.gain) && dimMatch(d.naxis1,d.naxis2,rep.naxis1,rep.naxis2)) {
-                        if (expMatch(d.exptime,rep.exptime)) m.append(d);
-                        else mRelaxed.append(d);
-                    }
-                }
-                bool relaxed = m.isEmpty();
-                if (relaxed) m = std::move(mRelaxed);
-                if (!m.isEmpty()) {
-                    QDir().mkpath(groupDir+"/darks");
-                    for (const auto& d:m) QFile::copy(d.path, groupDir+"/darks/"+QFileInfo(d.path).fileName());
-                    if (relaxed) {
-                        float darkExpAvg = 0.0f;
-                        for (const auto& d:m) darkExpAvg += (d.exptime>0 ? d.exptime : 0.0f);
-                        darkExpAvg /= m.size();
-                        float lightExp = rep.exptime>0 ? rep.exptime : 0.0f;
-                        float ratio = (darkExpAvg>0 && lightExp>0) ? lightExp/darkExpAvg : 1.0f;
-                        logLine(QString("  *** WARNING: Darks exposure mismatch — lights=%1s darks=%2s dark_mul=%3")
-                            .arg(lightExp,0,'f',1).arg(darkExpAvg,0,'f',1).arg(ratio,0,'f',4));
-                        if (ratio<0.4f||ratio>2.5f)
-                            logLine("  *** STRONG WARNING: ratio extreme (>2.5x or <0.4x) — results may be poor!");
-                        sg.darkScale = ratio;
-                    } else {
-                        logLine(QString("  Darks: matched %1/%2 (exp=%3s, gain=%4)")
-                            .arg(m.size()).arg(darks.size()).arg(rep.exptime,0,'f',1).arg(rep.gain,0,'f',1));
-                    }
-                    sg.hasCalib = true;
-                } else {
-                    logLine("  Darks: no match found");
-                }
-            }
-
-            // Match & copy flats (filter+gain; fall back to gain-only) — single pass
-            if (!flats.isEmpty()) {
-                QVector<CalibMeta> m, mRelaxed;
-                for (const auto& f:flats) {
-                    if (gainMatch(f.gain,rep.gain) && dimMatch(f.naxis1,f.naxis2,rep.naxis1,rep.naxis2)) {
-                        bool fltOk = f.filter.isEmpty()||g.filter.isEmpty()||
-                                     f.filter.compare(g.filter,Qt::CaseInsensitive)==0;
-                        if (fltOk) m.append(f);
-                        else mRelaxed.append(f);
-                    }
-                }
-                if (m.isEmpty()) {
-                    m = std::move(mRelaxed);
-                    if (!m.isEmpty()) logLine("  Flats: filter mismatch, using gain-matched flats");
-                }
-                if (!m.isEmpty()) {
-                    QDir().mkpath(groupDir+"/flats");
-                    for (const auto& f:m) QFile::copy(f.path, groupDir+"/flats/"+QFileInfo(f.path).fileName());
-                    logLine(QString("  Flats: matched %1/%2").arg(m.size()).arg(flats.size()));
-                    sg.hasCalib = true;
-                } else {
-                    logLine("  Flats: no match found");
-                }
-            }
-
-            stackGroups_.append(sg);
-            logLine("");
-        }
-
-        sessionDir_ = session; sirilBin_ = sirilBin; filterIdx_ = 0;
-        processNextFilter();
-    }
-
-    void processNextFilter() {
-        if (filterIdx_ >= stackGroups_.size()) {
-            log_->appendPlainText("\n=== All groups processed. ===");
-            killBtn_->setEnabled(false); return;
-        }
-        const StackGroup& sg = stackGroups_[filterIdx_];
-        QString groupDir  = sg.groupDir;
-        QString groupName = QFileInfo(groupDir).fileName();
-        log_->appendPlainText(QString("\n--- Stacking: %1 ---").arg(groupName));
-
-        auto hasFits = [](const QString& dir) -> bool {
-            return QDir(dir).exists() &&
-                   !QDir(dir).entryInfoList(kFitsExts(),QDir::Files).isEmpty();
-        };
-        bool hasBias  = hasFits(groupDir+"/biases");
-        bool hasDark  = hasFits(groupDir+"/darks");
-        bool hasFlatF = hasFits(groupDir+"/flats");
-        bool hasCalib = hasBias||hasDark||hasFlatF;
-
-        QString method  = methodCombo_->currentText();
-        QString norm    = normCombo_->currentText();
-        QString sigLo   = sigLowEdit_->text().trimmed().isEmpty()  ? "3" : sigLowEdit_->text().trimmed();
-        QString sigHi   = sigHighEdit_->text().trimmed().isEmpty() ? "3" : sigHighEdit_->text().trimmed();
-        QString rejArgs = (method == "rej") ? QString(" %1 %2").arg(sigLo, sigHi) : "";
-        QDir().mkpath(groupDir+"/process");
-
-        QString script = groupDir+"/_stack.ssf";
-        {
-            QFile sf(script); if (!sf.open(QIODevice::WriteOnly|QIODevice::Text)) return;
-            QTextStream ts(&sf);
-            ts << "requires 1.0.0\n\n";
-            if (hasCalib) {
-                if (hasBias) {
-                    ts << "cd " << groupDir << "/biases\n"
-                       << "convert bias -out=../process\n"
-                       << "cd ../process\n"
-                       << "stack bias_ rej 3 3 -norm=no\n\n";
-                }
-                if (hasDark) {
-                    ts << "cd " << groupDir << "/darks\n"
-                       << "convert dark -out=../process\n"
-                       << "cd ../process\n"
-                       << "stack dark_ rej 3 3 -norm=no\n\n";
-                }
-                if (hasFlatF) {
-                    ts << "cd " << groupDir << "/flats\n"
-                       << "convert flat -out=../process\n"
-                       << "cd ../process\n"
-                       << "stack flat_ rej 3 3 -norm=mulscale\n\n";
-                }
-                // Read lights directly from original sorted folder — no copy needed
-                ts << "cd " << sg.lightsPath << "\n"
-                   << "convert light -out=" << groupDir << "/process\n"
-                   << "cd " << groupDir << "/process\n";
-                QString calCmd = "calibrate light_";
-                if (hasBias) calCmd += " -bias=bias_stacked";
-                if (hasDark) {
-                    calCmd += " -dark=dark_stacked";
-                    if (std::abs(sg.darkScale - 1.0f) > 0.001f)
-                        calCmd += QString(" -dark_mul=%1").arg(sg.darkScale, 0, 'f', 4);
-                }
-                if (hasFlatF) calCmd += " -flat=flat_stacked";
-                if (hasDark||hasBias) calCmd += " -cc=dark";
-                ts << calCmd << "\n"
-                   << "register pp_light_ -2pass\n"
-                   << "stack r_pp_light_" << method << rejArgs << " -norm=" << norm << "\n";
-            } else {
-                // No calibration — read lights directly from original sorted folder
-                ts << "cd " << sg.lightsPath << "\n"
-                   << "convert light -out=" << groupDir << "/process\n"
-                   << "cd " << groupDir << "/process\n"
-                   << "register light_ -2pass\n"
-                   << "stack r_light_" << method << rejArgs << " -norm=" << norm << "\n";
-            }
-        }
-        log_->appendPlainText(QString("  Lights: %1").arg(sg.lightsPath));
-        log_->appendPlainText(QString("  Calibration: bias=%1 dark=%2 flat=%3")
-            .arg(hasBias?"yes":"no").arg(hasDark?"yes":"no").arg(hasFlatF?"yes":"no"));
-
-        proc_ = new QProcess(this);
-        proc_->setWorkingDirectory(groupDir);
-        connect(proc_,&QProcess::readyReadStandardOutput,this,[this](){
-            log_->appendPlainText(proc_->readAllStandardOutput()); });
-        connect(proc_,&QProcess::readyReadStandardError,this,[this](){
-            log_->appendPlainText(proc_->readAllStandardError()); });
-        connect(proc_,QOverload<int,QProcess::ExitStatus>::of(&QProcess::finished),
-                this,[this,groupDir,groupName,hasCalib](int code,QProcess::ExitStatus){
-            proc_->deleteLater(); proc_=nullptr;
-            QStringList candidates;
-            if (hasCalib) candidates<<groupDir+"/process/r_pp_light__stacked.fit"
-                                    <<groupDir+"/process/r_pp_light__stacked.fits"
-                                    <<groupDir+"/process/r_pp_light_stacked.fit"
-                                    <<groupDir+"/process/r_pp_light_stacked.fits";
-            candidates<<groupDir+"/process/r_light__stacked.fit"
-                      <<groupDir+"/process/r_light__stacked.fits"
-                      <<groupDir+"/process/r_light_stacked.fit"
-                      <<groupDir+"/process/r_light_stacked.fits";
-            QString found;
-            for (const auto& c:candidates) if(QFile::exists(c)){found=c;break;}
-            if (code==0&&!found.isEmpty()) {
-                QString out=sessionDir_+"/"+groupName+"_stacked.fit";
-                QFile::copy(found,out);
-                log_->appendPlainText("  -> Result: "+out);
-            } else {
-                log_->appendPlainText(QString("  WARNING: siril exited %1").arg(code));
-                log_->appendPlainText("  Script: "+groupDir+"/_stack.ssf");
-            }
-            filterIdx_++; processNextFilter();
-        });
-        QStringList args;
-        if (sirilBin_=="siril-cli") args<<"-s"<<script;
-        else                         args<<"--cli"<<"-s"<<script;
-        proc_->start(sirilBin_,args);
-        killBtn_->setEnabled(true);
-        log_->appendPlainText("  Running siril…");
-    }
-
-    void stopStack() {
-        if (proc_&&proc_->state()!=QProcess::NotRunning) {
-            proc_->kill(); log_->appendPlainText("\n[Stopped by user]");
-        }
-        killBtn_->setEnabled(false);
-    }
-
-private:
-    QLineEdit      *lightsEdit_=nullptr, *sessionEdit_=nullptr;
-    QLineEdit      *biasEdit_=nullptr,   *darkEdit_=nullptr, *flatEdit_=nullptr;
-    QComboBox      *methodCombo_=nullptr, *normCombo_=nullptr;
-    QLineEdit      *sigLowEdit_=nullptr, *sigHighEdit_=nullptr;
-    QPushButton    *killBtn_=nullptr;
-    QPlainTextEdit *log_=nullptr;
-    QProcess       *proc_=nullptr;
-    QVector<StackGroup> stackGroups_;
-    QString         sessionDir_, sirilBin_;
-    int             filterIdx_=0;
-};
-
 // ============================================================
 // ArrangeFitsPanel — scan a messy folder, arrange into
 //   arrange_<X>/Target/Filter/lights/  ready for stacking
@@ -2588,16 +2026,12 @@ public:
 
         // Output path display
         outPathLbl_ = new QLabel("Output: (select input folder first)");
-        outPathLbl_->setStyleSheet("QLabel{color:#28f0b0;font-weight:bold;background:rgba(0,60,40,0.4);"
-                                  "border:1px solid #0d6040;border-radius:4px;padding:4px 8px;}");
+        outPathLbl_->setStyleSheet(theme::sub("QLabel{color:@aurora@;font-weight:600;background:rgba(94,234,212,0.07);"
+                                  "border:1px solid rgba(94,234,212,0.30);border-radius:10px;padding:6px 10px;}"));
         vbox->addWidget(outPathLbl_);
 
-        // --- Calibration group box (optional) ---
+        // --- Calibration group box (optional) — styled by the global sheet ---
         auto* calibGrp = new QGroupBox("Calibration frames  (optional — leave blank to skip)");
-        calibGrp->setStyleSheet(
-            "QGroupBox{font-weight:bold;color:#60c8f0;border:1px solid #1a4a6a;"
-            "border-radius:6px;margin-top:8px;padding-top:6px;}"
-            "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}");
         auto* cg = new QVBoxLayout(calibGrp);
         cg->setSpacing(6); cg->setContentsMargins(8,10,8,8);
 
@@ -2609,9 +2043,9 @@ public:
             btn  = new QPushButton("Browse…"); btn->setFixedWidth(90); btn->setMinimumHeight(28);
             auto* clr = new QPushButton("✕"); clr->setFixedWidth(28); clr->setMinimumHeight(28);
             clr->setToolTip("Clear");
-            clr->setStyleSheet("QPushButton{padding:0;font-size:9pt;background:#0c1828;color:#aa4040;"
-                               "border:1px solid #2a1a1a;border-radius:3px;}"
-                               "QPushButton:hover{background:#1a0808;color:#ff6060;}");
+            clr->setStyleSheet(theme::sub("QPushButton{padding:0;font-size:9pt;background:rgba(244,114,114,0.07);color:@danger@;"
+                               "border:1px solid rgba(244,114,114,0.30);border-radius:8px;}"
+                               "QPushButton:hover{background:rgba(244,114,114,0.16);color:#ffb0b0;border-color:@danger@;}"));
             QLineEdit* ep = edit;
             connect(clr, &QPushButton::clicked, this, [ep](){ ep->clear(); });
             h->addWidget(l); h->addWidget(edit,1); h->addWidget(btn); h->addWidget(clr);
@@ -2641,24 +2075,24 @@ public:
         optRow->addWidget(dryChk_); optRow->addWidget(splitExpChk_);
         optRow->addStretch(1);
         auto* runBtn = new QPushButton("▶  Arrange FITS for Stacking");
+        runBtn->setObjectName("cta");
         runBtn->setMinimumHeight(38); runBtn->setMinimumWidth(240);
-        runBtn->setStyleSheet(
-            "QPushButton{font-weight:bold;font-size:10pt;"
-            "background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1468a8,stop:1 #0b5490);"
-            "color:#d8f0ff;border:1px solid #1a80cc;}"
-            "QPushButton:hover{background:#1a80cc;color:#fff;}");
         optRow->addWidget(runBtn);
         vbox->addLayout(optRow);
 
-        // --- Log ---
+        // --- Log (styled by the global QPlainTextEdit rule) ---
         log_ = new QPlainTextEdit;
         log_->setReadOnly(true);
-        log_->setFont(QFont("Monospace",9));
-        log_->setStyleSheet("QPlainTextEdit{background:#060e18;color:#b8d0e8;"
-                            "border:1px solid #1a3650;border-radius:5px;}");
         vbox->addWidget(log_,1);
 
         connect(runBtn, &QPushButton::clicked, this, &ArrangeFitsPanel::runArrange);
+
+        // Restore the folders used last time.
+        QSettings st;
+        if (auto v = st.value("arrange/input").toString();   QDir(v).exists()) inputEdit_->setText(v);
+        if (auto v = st.value("arrange/bias").toString();    QDir(v).exists()) biasEdit_->setText(v);
+        if (auto v = st.value("arrange/dark").toString();    QDir(v).exists()) darkEdit_->setText(v);
+        if (auto v = st.value("arrange/flat").toString();    QDir(v).exists()) flatEdit_->setText(v);
     }
 
 private slots:
@@ -2667,6 +2101,12 @@ private slots:
         if (inputPath.isEmpty() || !QDir(inputPath).exists()) {
             QMessageBox::warning(this, "Input", "Select a valid input folder."); return;
         }
+        // Remember folders for next launch.
+        QSettings st;
+        st.setValue("arrange/input", inputPath);
+        st.setValue("arrange/bias", biasEdit_->text().trimmed());
+        st.setValue("arrange/dark", darkEdit_->text().trimmed());
+        st.setValue("arrange/flat", flatEdit_->text().trimmed());
         QFileInfo fi(inputPath);
         QString outRoot = fi.absolutePath() + "/arrange_" + fi.fileName();
         bool dryRun     = dryChk_->isChecked();
@@ -2837,7 +2277,7 @@ private slots:
 
         logLine(dryRun
             ? "\n[DRY RUN complete — no files were copied]"
-            : "\n=== Done. Folder is ready for stacking in Siril Stack tab. ===");
+            : "\n=== Done. Folder is ready for stacking in Siril or any other stacker. ===");
         if (!dryRun)
             logLine("Output: " + outRoot);
     }
@@ -2851,19 +2291,6 @@ private:
 };
 
 // ============================================================
-// ToolsPanel — wraps Sort + Stack + Arrange in a sub-tab widget
-// ============================================================
-class ToolsPanel : public QWidget {
-    Q_OBJECT
-public:
-    explicit ToolsPanel(QWidget* parent=nullptr) : QWidget(parent) {
-        auto* vbox = new QVBoxLayout(this);
-        vbox->setContentsMargins(0,0,0,0); vbox->setSpacing(0);
-        vbox->addWidget(new ArrangeFitsPanel);
-    }
-};
-
-// ============================================================
 // MainWindow
 // ============================================================
 class MainWindow : public QMainWindow {
@@ -2872,112 +2299,137 @@ public:
   MainWindow() {
     cfg_ = loadConfig();
 
-    setStyleSheet(R"(
-      QMainWindow { background-color: #080e18; }
-      QWidget { background-color: #0c1524; color: #c8ddf0;
-        font-family: 'Inter','Ubuntu','Segoe UI',sans-serif; font-size: 10pt; }
-      QTabWidget::pane { border: 1px solid #1a3650; border-top: 2px solid #0a7acc; background: #0c1524; }
-      QTabBar::tab { background: #091220; color: #5a8aaa; padding: 9px 22px; margin-right: 3px;
-        border-top-left-radius: 6px; border-top-right-radius: 6px;
-        border: 1px solid #1a3650; border-bottom: none; font-size: 9.5pt; }
-      QTabBar::tab:selected { background: #0c1524; color: #00ccff; border-color: #0a7acc;
-        border-bottom: none; font-weight: bold; }
-      QTabBar::tab:hover:!selected { background: #0f1e34; color: #90b8d4; }
-      QListWidget { background-color: #070d18; border: 1px solid #1a3650; border-radius: 6px;
-        padding: 4px; font-family: 'Inter',sans-serif;
-        font-size: 9.5pt; outline: 0; }
-      QListWidget::item { padding: 8px 12px; color: #b8d0e8; background-color: #0c1828;
-        border: 1px solid #162840; border-radius: 4px; margin: 1px 2px; }
-      QListWidget::item:selected { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #004e9e,stop:1 #006dbf);
-        color: #fff; font-weight: bold; border: 1px solid #00aaff; }
-      QListWidget::item:hover:!selected { background-color: #122e4a; color: #d8eeff; border: 1px solid #1a5080; }
-      QPushButton { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1670b8,stop:1 #0e5a90);
-        color: #eaf6ff; border: 1px solid #1a80cc; padding: 8px 20px; border-radius: 6px;
-        font-weight: bold; font-size: 9pt; }
-      QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1a80cc,stop:1 #1670b8);
-        border-color: #40aaff; color: #fff; }
-      QPushButton:pressed { background: #093c6e; }
-      QPushButton:disabled { background: #0c1a28; color: #2a5070; border-color: #1a2a3a; }
-      QTextEdit { background-color: #06101c; color: #c0d8ec; border: 1px solid #1a3650;
-        border-radius: 6px; padding: 12px;
-        font-family: 'JetBrains Mono','Consolas','Courier New',monospace; font-size: 9.5pt; }
-      QLabel { background: transparent; color: #7a9abb; padding: 2px 6px; font-size: 9pt; }
-      QLineEdit { background-color: #0b1828; color: #60c8f0; border: 1px solid #1a4a6a;
-        border-radius: 4px; padding: 4px 8px; }
-      QLineEdit:focus { border: 1px solid #00aeff; background-color: #0e2038; }
-      QComboBox { background-color: #0b1828; color: #60c8f0; border: 1px solid #1a4a6a;
-        border-radius: 4px; padding: 4px 8px; }
-      QComboBox::drop-down { border: none; }
-      QComboBox QAbstractItemView { background: #0c1828; color: #b8d0e8; border: 1px solid #1a3650; }
-      QCheckBox { color: #90b8d4; spacing: 6px; }
-      QCheckBox::indicator { width:14px; height:14px; border:1px solid #1a4a6a; border-radius:3px;
-        background:#0b1828; }
-      QCheckBox::indicator:checked { background:#0a7acc; border-color:#00aeff; }
-      QSplitter::handle { background: #1a3650; }
-      QScrollBar:vertical { background:#07101c; width:8px; border:none; border-radius:4px; }
-      QScrollBar::handle:vertical { background:#1e4a6a; border-radius:4px; min-height:24px; }
-      QScrollBar::handle:vertical:hover { background:#2a6090; }
+    setStyleSheet(theme::sub(R"(
+      QMainWindow { background-color: @void@; }
+      QWidget { background-color: @void@; color: @ink@;
+        font-family: @sans@; font-size: 10pt; }
+      QTabWidget::pane { border: 1px solid rgba(255,255,255,0.07); border-radius: 14px;
+        background: @deep@; top: -1px; }
+      QTabBar::tab { background: transparent; color: @inkdim@; padding: 9px 20px; margin-right: 4px;
+        border: 1px solid transparent; border-radius: 10px;
+        font-family: @display@; font-weight: 600; font-size: 10pt; }
+      QTabBar::tab:selected { background: @panel@; color: @plasma@; border: 1px solid rgba(255,255,255,0.07); }
+      QTabBar::tab:hover:!selected { color: @ink@; }
+      QListWidget { background-color: @deep@; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px;
+        padding: 6px; font-size: 9.5pt; outline: 0; }
+      QListWidget::item { padding: 9px 12px; color: @ink@; background-color: transparent;
+        border: 1px solid transparent; border-radius: 8px; margin: 1px 2px; }
+      QListWidget::item:selected { background: rgba(34,211,238,0.14);
+        color: @plasma@; font-weight: 600; border: 1px solid rgba(34,211,238,0.5); }
+      QListWidget::item:hover:!selected { background-color: rgba(255,255,255,0.04); color: @aurora@; border: 1px solid rgba(255,255,255,0.07); }
+      QPushButton { background: rgba(255,255,255,0.04); color: @ink@; border: 1px solid rgba(255,255,255,0.10);
+        padding: 8px 18px; border-radius: 10px; font-weight: 600; font-size: 9.5pt; }
+      QPushButton:hover { background: rgba(34,211,238,0.06); border-color: @plasma@; color: @plasma@; }
+      QPushButton:pressed { background: rgba(34,211,238,0.14); }
+      QPushButton:disabled { background: transparent; color: #4a4f63; border-color: rgba(255,255,255,0.05); }
+      QPushButton#cta { background: @plasma@; color: @onaccent@; border: 1px solid @plasma@; font-weight: 700; }
+      QPushButton#cta:hover { background: @aurora@; border-color: @aurora@; color: @onaccent@; }
+      QPushButton#cta:pressed { background: #1ba7bd; }
+      QPushButton#cta:disabled { background: rgba(34,211,238,0.18); color: rgba(2,18,26,0.45); border-color: transparent; }
+      QPushButton#scan { background: rgba(94,234,212,0.08); color: @aurora@; border: 1px solid rgba(94,234,212,0.45); font-weight: 700; }
+      QPushButton#scan:hover { background: rgba(94,234,212,0.16); border-color: @aurora@; color: #b6fff0; }
+      QPushButton#scan:disabled { background: transparent; color: #3a5650; border-color: rgba(94,234,212,0.10); }
+      QPushButton#danger { background: rgba(244,114,114,0.07); color: @danger@; border: 1px solid rgba(244,114,114,0.40); }
+      QPushButton#danger:hover { background: rgba(244,114,114,0.16); border-color: @danger@; color: #ffb0b0; }
+      QPushButton#danger:disabled { background: transparent; color: #5a3a3a; border-color: rgba(244,114,114,0.10); }
+      QTextEdit { background-color: @deep@; color: @ink@; border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 12px; padding: 12px;
+        font-family: @mono@; font-size: 9.5pt; }
+      QPlainTextEdit { background-color: @deep@; color: @ink@; border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 12px; padding: 10px; font-family: @mono@; font-size: 9pt; }
+      QLabel { background: transparent; color: @inkdim@; padding: 2px 6px; font-size: 9pt; }
+      QLineEdit { background-color: rgba(255,255,255,0.04); color: @ink@; border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 10px; padding: 7px 12px; selection-background-color: @plasma@; selection-color: @onaccent@; }
+      QLineEdit:focus { border: 1px solid @plasma@; background-color: rgba(34,211,238,0.05); }
+      QComboBox { background-color: rgba(255,255,255,0.04); color: @ink@; border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 10px; padding: 6px 12px; }
+      QComboBox:hover { border-color: @plasma@; }
+      QComboBox::drop-down { border: none; width: 22px; }
+      QComboBox QAbstractItemView { background: @panel@; color: @ink@; border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 8px; selection-background-color: rgba(34,211,238,0.18); selection-color: @plasma@; outline: 0; }
+      QCheckBox { color: @ink@; spacing: 7px; }
+      QCheckBox::indicator { width:15px; height:15px; border:1px solid rgba(255,255,255,0.10); border-radius:4px;
+        background:rgba(255,255,255,0.04); }
+      QCheckBox::indicator:hover { border-color:@plasma@; }
+      QCheckBox::indicator:checked { background:@plasma@; border-color:@plasma@; }
+      QGroupBox { border:1px solid rgba(255,255,255,0.07); border-radius:12px; margin-top:14px; padding-top:10px;
+        font-family:@display@; font-weight:600; color:@ink@; }
+      QGroupBox::title { subcontrol-origin:margin; left:14px; padding:0 6px; color:@plasma@; }
+      QSplitter::handle { background: rgba(255,255,255,0.07); }
+      QScrollBar:vertical { background:transparent; width:10px; border:none; margin:2px; }
+      QScrollBar::handle:vertical { background:rgba(255,255,255,0.12); border-radius:5px; min-height:28px; }
+      QScrollBar::handle:vertical:hover { background:@plasma@; }
       QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }
-      QToolTip { background-color:#0e2035; color:#b8d8f0; border:1px solid #1a5070;
-        padding:5px 8px; border-radius:4px; }
-    )");
+      QScrollBar:horizontal { background:transparent; height:10px; border:none; margin:2px; }
+      QScrollBar::handle:horizontal { background:rgba(255,255,255,0.12); border-radius:5px; min-width:28px; }
+      QScrollBar::handle:horizontal:hover { background:@plasma@; }
+      QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width:0; }
+      QToolTip { background-color:@panel@; color:@ink@; border:1px solid rgba(255,255,255,0.07);
+        padding:6px 10px; border-radius:8px; }
+      QDialog, QMessageBox { background-color:@deep@; }
+    )"));
 
     QWidget* central = new QWidget;
     setCentralWidget(central);
 
+    // Top-level workflow tabs: Plan · Review · Arrange.
     tabs_ = new QTabWidget;
     tabs_->setDocumentMode(true);
 
-    // Imaging workflow tabs first (indices 0, 1)
-    fitsReviewer_ = new FitsReviewerPanel;
-    tabs_->addTab(fitsReviewer_, "FITS Reviewer");
-    toolsPanel_ = new ToolsPanel;
-    tabs_->addTab(toolsPanel_, "Tools");
-
-    // Target planning tabs (indices 2-6)
+    // ---- Plan: an inner tab widget holding the catalogue categories + search.
+    // All planner categories share the one right-hand panel (chart/details/framing).
+    plannerTabs_ = new QTabWidget;
+    plannerTabs_->setDocumentMode(true);
     setupTab("Nebula (Ha/SHO)", Category::Nebulae,  nebulaList_,  nebulaMore_);
     setupTab("Galaxies",         Category::Galaxies,  galaxyList_,  galaxyMore_);
     setupTab("Star clusters",    Category::Clusters,  clusterList_, clusterMore_);
     setupTab("Messier",          Category::Messier,   messierList_, messierMore_);
     setupSearchTab();
+    tabs_->addTab(plannerTabs_, "Plan");
+
+    // ---- Review & Arrange: imaging-workflow panels (full width, no right panel).
+    fitsReviewer_ = new FitsReviewerPanel;
+    tabs_->addTab(fitsReviewer_, "Review");
+    arrangePanel_ = new ArrangeFitsPanel;
+    tabs_->addTab(arrangePanel_, "Arrange");
 
     connect(tabs_, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
+    connect(plannerTabs_, &QTabWidget::currentChanged, this, &MainWindow::onPlannerTabChanged);
 
     info_  = new QTextEdit;  info_->setReadOnly(true);
     plot_  = new SkyPlotWidget;
-    plot_->setStyleSheet("QWidget{background-color:#06101c;border:1px solid #1a3650;border-radius:6px;}");
+    plot_->setStyleSheet(theme::sub("QWidget{background-color:@deep@;border:1px solid rgba(255,255,255,0.07);border-radius:12px;}"));
 
     locationLbl_ = new QLabel("Location: detecting…");
-    locationLbl_->setStyleSheet("QLabel{font-weight:bold;color:#28f0b0;background:rgba(0,70,45,0.55);border:1px solid #0d6640;border-radius:5px;padding:4px 10px;}");
+    locationLbl_->setStyleSheet(theme::chip(theme::Aurora));
     nightLbl_ = new QLabel("Night: …");
-    nightLbl_->setStyleSheet("QLabel{font-weight:bold;color:#ffd060;background:rgba(70,52,0,0.55);border:1px solid #7a5c00;border-radius:5px;padding:4px 10px;}");
+    nightLbl_->setStyleSheet(theme::chip(theme::Stellar));
     dbLbl_ = new QLabel("DB: …");
-    dbLbl_->setStyleSheet("QLabel{font-weight:bold;color:#ff9860;background:rgba(70,28,0,0.55);border:1px solid #7a3800;border-radius:5px;padding:4px 10px;}");
+    dbLbl_->setStyleSheet(theme::chip(theme::Nebula));
 
     QPushButton* refreshBtn = new QPushButton("Refresh Targets");
+    refreshBtn->setObjectName("cta");
     refreshBtn->setMinimumHeight(32);
     connect(refreshBtn,&QPushButton::clicked,this,&MainWindow::refreshNebulaFirst);
 
     auto* gearLbl=new QLabel("Gear:");
-    gearLbl->setStyleSheet("QLabel{color:#60c8f0;font-weight:bold;padding:2px 4px;}");
-    profileCombo_=new QComboBox; profileCombo_->setMinimumWidth(260);
-    profileCombo_->setStyleSheet("QComboBox{background:#0b1828;color:#c8e0f8;border:1px solid #1a4060;border-radius:4px;padding:3px 8px;min-height:26px;}"
-                                  "QComboBox::drop-down{border:none;width:20px;}"
-                                  "QComboBox QAbstractItemView{background:#0c1828;color:#b8d0e8;border:1px solid #1a3650;}");
+    gearLbl->setStyleSheet(theme::sub("QLabel{color:@plasma@;font-family:@display@;font-weight:600;padding:2px 4px;}"));
+    profileCombo_=new QComboBox; profileCombo_->setMinimumWidth(260); profileCombo_->setMinimumHeight(30);
     for(const auto& p:cfg_.gearProfiles) profileCombo_->addItem(p.name);
     profileCombo_->setCurrentIndex(cfg_.activeProfile);
     auto* gearBtn=new QPushButton("⚙ Profiles"); gearBtn->setMinimumHeight(28);
     fovInfoLbl_=new QLabel("FOV: —");
-    fovInfoLbl_->setStyleSheet("QLabel{color:#5a90b0;font-weight:bold;padding:3px 10px;min-width:130px;border-radius:4px;}");
+    static const QString kFovDim = theme::sub("QLabel{color:@inkdim@;font-weight:600;padding:3px 12px;min-width:130px;border-radius:999px;}");
+    fovInfoLbl_->setStyleSheet(kFovDim);
 
     auto updateFovLabel=[this](){
       auto fov=computeFov(cfg_);
       if(fov){
         fovInfoLbl_->setText(QString("FOV: %1'×%2'").arg(fov->first,0,'f',0).arg(fov->second,0,'f',0));
-        fovInfoLbl_->setStyleSheet("QLabel{color:#20e8c0;font-weight:bold;padding:3px 10px;min-width:130px;background:rgba(0,80,60,0.5);border:1px solid #0d7050;border-radius:4px;}");
+        fovInfoLbl_->setStyleSheet(theme::chip(theme::Aurora)+"QLabel{min-width:130px;}");
       }else{
         fovInfoLbl_->setText("FOV: —");
-        fovInfoLbl_->setStyleSheet("QLabel{color:#5a90b0;font-weight:bold;padding:3px 10px;min-width:130px;border-radius:4px;}");
+        fovInfoLbl_->setStyleSheet(kFovDim);
       }
     };
     connect(profileCombo_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this,updateFovLabel](int idx){
@@ -3031,7 +2483,7 @@ public:
     QVBoxLayout* root = new QVBoxLayout(central); root->setSpacing(8); root->setContentsMargins(12,12,12,12);
     root->addLayout(top); root->addLayout(main,1);
 
-    setWindowTitle("Astro Toolkit — Target Picker + FITS Reviewer + Tools");
+    setWindowTitle("Astro Toolkit");
     resize(1440,860);
     if(QScreen* s=QGuiApplication::primaryScreen()){
       QRect g=s->geometry(); move((g.width()-width())/2,(g.height()-height())/2);
@@ -3043,10 +2495,10 @@ private:
   void setupTab(const QString& title,Category cat,QListWidget*& lOut,QPushButton*& mOut){
     QWidget* page=new QWidget; QVBoxLayout* v=new QVBoxLayout(page); v->setSpacing(8); v->setContentsMargins(8,8,8,8);
     QListWidget* list=new QListWidget; list->setMinimumWidth(420);
-    list->setSelectionMode(QAbstractItemView::SingleSelection); list->setAlternatingRowColors(true); list->setSpacing(2);
+    list->setSelectionMode(QAbstractItemView::SingleSelection); list->setAlternatingRowColors(false); list->setSpacing(2);
     QPushButton* more=new QPushButton("Load More"); more->setMinimumHeight(32);
     v->addWidget(list,1); v->addWidget(more);
-    tabs_->addTab(page,title); lOut=list; mOut=more;
+    plannerTabs_->addTab(page,title); lOut=list; mOut=more;
     connect(list,&QListWidget::itemSelectionChanged,this,[this,cat,list](){onSelectFromList(cat,list);});
     connect(more,&QPushButton::clicked,this,[this,cat,list](){loadMoreList(cat,list);});
   }
@@ -3059,12 +2511,12 @@ private:
     QPushButton* sb=new QPushButton("Search"); sb->setMinimumHeight(32); sb->setFixedWidth(100);
     bar->addWidget(searchInput_,1); bar->addWidget(sb);
     searchStatusLbl_=new QLabel("Type a name and press Search.");
-    searchStatusLbl_->setStyleSheet("QLabel{color:#5a90b0;padding:2px 4px;font-style:italic;}");
+    searchStatusLbl_->setStyleSheet(theme::sub("QLabel{color:@inkdim@;padding:2px 4px;font-style:italic;}"));
     searchList_=new QListWidget; searchList_->setMinimumWidth(420);
-    searchList_->setSelectionMode(QAbstractItemView::SingleSelection); searchList_->setAlternatingRowColors(true); searchList_->setSpacing(2);
+    searchList_->setSelectionMode(QAbstractItemView::SingleSelection); searchList_->setAlternatingRowColors(false); searchList_->setSpacing(2);
     searchMore_=new QPushButton("Load More"); searchMore_->setMinimumHeight(32); searchMore_->setEnabled(false);
     v->addLayout(bar); v->addWidget(searchStatusLbl_); v->addWidget(searchList_,1); v->addWidget(searchMore_);
-    tabs_->addTab(page,"Search");
+    plannerTabs_->addTab(page,"Search");
     connect(sb,&QPushButton::clicked,this,&MainWindow::runSearch);
     connect(searchInput_,&QLineEdit::returnPressed,this,&MainWindow::runSearch);
     connect(searchList_,&QListWidget::itemSelectionChanged,this,&MainWindow::onSearchItemSelected);
@@ -3073,8 +2525,9 @@ private:
 
   void switchRightPage(int idx){
     rightStack_->setCurrentIndex(idx);
-    const QString on="QPushButton{background:#0c2e50;border:1px solid #0a7acc;color:#00ccff;border-radius:5px;padding:6px 22px;font-weight:bold;}";
-    const QString off="QPushButton{background:#080e18;border:1px solid #1a3a5a;color:#4a7090;border-radius:5px;padding:6px 22px;}";
+    static const QString on=theme::sub("QPushButton{background:rgba(34,211,238,0.14);border:1px solid rgba(34,211,238,0.5);color:@plasma@;border-radius:10px;padding:6px 22px;font-weight:700;}");
+    static const QString off=theme::sub("QPushButton{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);color:@inkdim@;border-radius:10px;padding:6px 22px;}"
+                                        "QPushButton:hover{color:@ink@;border-color:rgba(255,255,255,0.16);}");
     skyPageBtn_->setStyleSheet(idx==0?on:off);
     infoPageBtn_->setStyleSheet(idx==1?on:off);
     framingBtn_->setStyleSheet(idx==2?on:off);
@@ -3131,23 +2584,27 @@ private slots:
         info_->append("DB: "+cfg_.sqlitePath);
         info_->append(QString("Nebulae tonight: %1").arg((int)nebulae_.size()));
         info_->append("Tip: Click other tabs to load more categories");
-        tabs_->setCurrentIndex(2); setEnabled(true); // Nebula tab is now at index 2
+        tabs_->setCurrentIndex(0); plannerTabs_->setCurrentIndex(0); setEnabled(true); // Plan → Nebula
       },Qt::QueuedConnection);
     });
     (void)fut;
   }
 
+  // Top-level: only the Plan tab uses the right-hand chart/details/framing panel.
+  // Compare against the widget itself so this never breaks if tab order changes.
   void onTabChanged(int idx){
-    // Target planning tabs: Galaxies=3, Clusters=4, Messier=5
-    if(idx==3&&!galLoaded_)loadCategoryAsync(Category::Galaxies);
-    if(idx==4&&!cluLoaded_)loadCategoryAsync(Category::Clusters);
-    if(idx==5&&!mesLoaded_)loadCategoryAsync(Category::Messier);
-    // FITS Reviewer (0) and Tools (1) use full width — hide the sky chart panel
-    bool fullWidth = (idx==0||idx==1);
-    rightPanel_->setVisible(!fullWidth);
-    tabs_->setSizePolicy(
-        fullWidth ? QSizePolicy::Expanding : QSizePolicy::Preferred,
-        QSizePolicy::Expanding);
+    bool isPlan = (tabs_->widget(idx) == plannerTabs_);
+    rightPanel_->setVisible(isPlan);
+    tabs_->setSizePolicy(isPlan ? QSizePolicy::Preferred : QSizePolicy::Expanding,
+                         QSizePolicy::Expanding);
+  }
+
+  // Inner planner tabs (created in order): 0 Nebula, 1 Galaxies, 2 Clusters,
+  // 3 Messier, 4 Search. Categories load lazily the first time they're shown.
+  void onPlannerTabChanged(int idx){
+    if(idx==1&&!galLoaded_)loadCategoryAsync(Category::Galaxies);
+    if(idx==2&&!cluLoaded_)loadCategoryAsync(Category::Clusters);
+    if(idx==3&&!mesLoaded_)loadCategoryAsync(Category::Messier);
   }
 
   void loadCategoryAsync(Category cat){
@@ -3236,7 +2693,7 @@ private slots:
     const QString term=searchInput_->text().trimmed(); if(term.isEmpty())return;
     searchList_->clear();searchResults_.clear();searchShown_=0;searchMore_->setEnabled(false);
     searchStatusLbl_->setText("Searching…");
-    searchStatusLbl_->setStyleSheet("QLabel{color:#ffd060;padding:2px 4px;font-style:italic;}");
+    searchStatusLbl_->setStyleSheet(theme::sub("QLabel{color:@stellar@;padding:2px 4px;font-style:italic;}"));
     const AppConfig cfg=cfg_; const LocationFix loc=location_; const NightWindow win=night_;
     auto fut=QtConcurrent::run([this,term,cfg,loc,win](){
       auto raw=fetchSearchFromDb(cfg,term);
@@ -3250,8 +2707,8 @@ private slots:
       QMetaObject::invokeMethod(this,[this,raw=std::move(raw),loc]()mutable{
         searchResults_=std::move(raw);searchShown_=0;searchList_->clear();loadMoreSearchResults();
         int n=(int)searchResults_.size();
-        if(n==0){searchStatusLbl_->setText("No objects found.");searchStatusLbl_->setStyleSheet("QLabel{color:#ff7060;padding:2px 4px;font-style:italic;}");}
-        else{searchStatusLbl_->setText(QString("Found %1 object%2.%3").arg(n).arg(n==1?"":"s").arg(loc.ok?"":" (refresh for sky paths)"));searchStatusLbl_->setStyleSheet("QLabel{color:#28f0b0;padding:2px 4px;font-style:italic;}");}
+        if(n==0){searchStatusLbl_->setText("No objects found.");searchStatusLbl_->setStyleSheet(theme::sub("QLabel{color:@danger@;padding:2px 4px;font-style:italic;}"));}
+        else{searchStatusLbl_->setText(QString("Found %1 object%2.%3").arg(n).arg(n==1?"":"s").arg(loc.ok?"":" (refresh for sky paths)"));searchStatusLbl_->setStyleSheet(theme::sub("QLabel{color:@aurora@;padding:2px 4px;font-style:italic;}"));}
       },Qt::QueuedConnection);
     });
     (void)fut;
@@ -3282,6 +2739,7 @@ private:
   QComboBox*  profileCombo_=nullptr;
   QLabel *fovInfoLbl_=nullptr;
   QTabWidget* tabs_=nullptr;
+  QTabWidget* plannerTabs_=nullptr;
   QListWidget *nebulaList_=nullptr,*galaxyList_=nullptr,*clusterList_=nullptr,*messierList_=nullptr;
   QPushButton *nebulaMore_=nullptr,*galaxyMore_=nullptr,*clusterMore_=nullptr,*messierMore_=nullptr;
   QLineEdit*   searchInput_=nullptr;
@@ -3302,13 +2760,17 @@ private:
   bool galLoaded_=false,cluLoaded_=false,mesLoaded_=false;
   QWidget*           rightPanel_=nullptr;
   FitsReviewerPanel* fitsReviewer_=nullptr;
-  ToolsPanel*        toolsPanel_=nullptr;
+  ArrangeFitsPanel*  arrangePanel_=nullptr;
 };
 
 #include "main.moc"
 
 int main(int argc,char** argv){
   QApplication app(argc,argv);
+  // Identify the app so QSettings has a stable store for remembered folders.
+  QApplication::setOrganizationName("AstroToolkit");
+  QApplication::setApplicationName("astro_toolkit");
+  QApplication::setApplicationDisplayName("Astro Toolkit");
   curl_global_init(CURL_GLOBAL_DEFAULT);
   MainWindow w; w.show();
   int rc=app.exec();
