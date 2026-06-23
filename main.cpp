@@ -2672,6 +2672,26 @@ private slots:
   std::vector<DSO>& vecFor(Category c){if(c==Category::Nebulae)return nebulae_;if(c==Category::Galaxies)return galaxies_;if(c==Category::Clusters)return clusters_;return messier_;}
   int& shownFor(Category c){if(c==Category::Nebulae)return nebShown_;if(c==Category::Galaxies)return galShown_;if(c==Category::Clusters)return cluShown_;return mesShown_;}
 
+  // Human-readable explanation for an empty target list — points at the most
+  // likely culprit (usually a short summer night vs. the min-hours filter).
+  QString emptyStateText() const {
+    const double winH = (night_.startUtc.isValid() && night_.endUtc.isValid())
+      ? night_.startUtc.secsTo(night_.endUtc)/3600.0 : -1.0;
+    QString msg = "  ✦  No targets match your filters tonight.\n";
+    if (winH >= 0 && winH + 0.05 < cfg_.minHoursAbove)
+      msg += QString("\n  Tonight's dark window is only %1 h, but you require\n"
+                     "  ≥ %2 h above %3°. Short summer nights at high latitude\n"
+                     "  rarely reach that. Lower \"min_hours_above\" in\n"
+                     "  ~/.astro_gui/config.json, or wait for longer nights.")
+               .arg(winH,0,'f',1).arg(cfg_.minHoursAbove,0,'f',1).arg(cfg_.minAltDeg,0,'f',0);
+    else
+      msg += QString("\n  Try lowering \"min_alt_deg\" (now %1°) or\n"
+                     "  \"min_hours_above\" (now %2 h) in ~/.astro_gui/config.json,\n"
+                     "  or widen your gear FOV.")
+               .arg(cfg_.minAltDeg,0,'f',0).arg(cfg_.minHoursAbove,0,'f',1);
+    return msg;
+  }
+
   void loadMoreList(Category cat,QListWidget* list){
     auto&v=vecFor(cat); auto&shown=shownFor(cat);
     int start=shown, end=std::min<int>(shown+cfg_.pageSize,(int)v.size());
@@ -2683,6 +2703,13 @@ private slots:
       QListWidgetItem* item=new QListWidgetItem(line); item->setForeground(QColor(240,240,250)); list->addItem(item);
     }
     shown=end;
+    // No candidates at all → show an explanatory, non-selectable placeholder.
+    if(v.empty() && list->count()==0){
+      auto* ph=new QListWidgetItem(emptyStateText());
+      ph->setFlags(Qt::NoItemFlags);
+      ph->setForeground(QColor(0x8b,0x91,0xa8)); // --ink-dim
+      list->addItem(ph);
+    }
   }
 
   void showTargetDetails(const DSO&o){
