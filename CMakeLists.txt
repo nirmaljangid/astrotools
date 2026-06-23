@@ -169,12 +169,17 @@ if(WIN32)
   install(TARGETS astro_toolkit
           RUNTIME DESTINATION .
   )
+  # Bundle the starter catalogue beside the binary so it can be auto-loaded.
+  install(FILES data/catalog.sqlite DESTINATION data OPTIONAL)
   message(STATUS "Install destination: Current directory (.)")
 else()
   install(TARGETS astro_toolkit
           RUNTIME DESTINATION bin
           RENAME astro-toolkit
   )
+  # Bundle the starter catalogue under <prefix>/share so the app can seed it on
+  # first run (see findBundledCatalog() in main.cpp).
+  install(FILES data/catalog.sqlite DESTINATION share/astro_toolkit OPTIONAL)
   message(STATUS "Install destination: /usr/local/bin/astro-toolkit (after 'sudo make install')")
 endif()
 
