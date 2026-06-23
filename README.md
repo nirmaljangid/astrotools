@@ -106,7 +106,22 @@ cmake --build build -j$(nproc)
 
 ## First-run setup
 
-### 1. Build the object catalogue
+The planner reads a local SQLite catalogue from `~/.astro_gui/catalog.sqlite`.
+
+### Quick start — bundled starter catalogue
+
+A small **starter catalogue** ships with the repo at [`data/catalog.sqlite`](data/catalog.sqlite)
+(a handful of popular targets — enough to try the app immediately). Copy it into place:
+
+```bash
+mkdir -p ~/.astro_gui
+cp data/catalog.sqlite ~/.astro_gui/catalog.sqlite
+```
+
+> This is a small sample, **not** the full OpenNGC catalogue. For the complete object
+> list, build the full database as below (it overwrites the starter file).
+
+### 1. Build the full object catalogue (recommended)
 
 The planner needs a local SQLite database built from the OpenNGC data files.  
 Clone [OpenNGC](https://github.com/mattiaverga/OpenNGC) and run the bundled importer:
