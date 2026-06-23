@@ -48,3 +48,5 @@ conanbuildinfo.cmake
 config.json
 *.db
 *.sqlite
+# …but DO ship the small starter catalogue bundled with the package
+!data/catalog.sqlite
