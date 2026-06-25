@@ -13,6 +13,8 @@
 #include <QGroupBox>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateEdit>
+#include <QTimeZone>
 #include <QPainter>
 #include <QKeyEvent>
 #include <QFutureWatcher>
@@ -163,6 +165,11 @@ struct AppConfig {
   QString ipGeoUrl = "https://ipapi.co/json/";
   double minAltDeg = 30.0;
   double minHoursAbove = 4.0;
+  // Sun-altitude threshold (deg) that defines "dark" and therefore the length of
+  // the usable night window. 0 = auto (astronomical −18°, falling back to nautical
+  // −12° on short summer nights). Negative = use that threshold explicitly:
+  //   −18 astronomical, −12 nautical, −6 civil.
+  double twilightDeg = 0.0;
   int pageSize = 5;
   QVector<GearProfile> gearProfiles;
   int activeProfile = 0;
@@ -196,6 +203,7 @@ static void saveDefaultConfig() {
   cfg["ip_geo_url"] = "https://ipapi.co/json/";
   cfg["min_alt_deg"] = 30.0;
   cfg["min_hours_above"] = 4.0;
+  cfg["twilight_deg"] = 0.0;
   cfg["page_size"] = 5;
   cfg["focal_length_mm"] = 1000.0;
   cfg["pixel_size_um"] = 3.76;
@@ -219,6 +227,7 @@ static AppConfig loadConfig() {
     if (doc.contains("ip_geo_url"))     cfg.ipGeoUrl = QString::fromStdString(doc["ip_geo_url"].get<std::string>());
     if (doc.contains("min_alt_deg"))    cfg.minAltDeg = doc["min_alt_deg"].get<double>();
     if (doc.contains("min_hours_above"))cfg.minHoursAbove = doc["min_hours_above"].get<double>();
+    if (doc.contains("twilight_deg") && doc["twilight_deg"].is_number()) cfg.twilightDeg = doc["twilight_deg"].get<double>();
     if (doc.contains("page_size"))      cfg.pageSize = doc["page_size"].get<int>();
     if (doc.contains("focal_length_mm") && doc["focal_length_mm"].is_number()) cfg.focalLengthMm = doc["focal_length_mm"].get<double>();
     if (doc.contains("pixel_size_um")  && doc["pixel_size_um"].is_number())    cfg.pixelSizeUm   = doc["pixel_size_um"].get<double>();
@@ -252,6 +261,7 @@ static void saveConfig(const AppConfig& cfg){
   doc["ip_geo_url"]=cfg.ipGeoUrl.toStdString();
   doc["min_alt_deg"]=cfg.minAltDeg;
   doc["min_hours_above"]=cfg.minHoursAbove;
+  doc["twilight_deg"]=cfg.twilightDeg;
   doc["page_size"]=cfg.pageSize;
   doc["active_profile"]=cfg.activeProfile;
   json profiles=json::array();
@@ -424,10 +434,26 @@ static double sunAltDeg(double jd,double lat,double lon){
 
 struct NightWindow { QDateTime startUtc,endUtc; QVector<QDateTime> gridUtc; };
 
-static std::optional<NightWindow> computeTonightWindow(double latDeg,double lonDeg){
+// Compute the usable dark window for the night that *begins* on the given local
+// evening date. `eveningLocalDate` is the calendar date of dusk (the scan spans
+// local noon → next-day noon, so the whole night belongs to one date and is never
+// split across midnight). `thresholdDeg` controls the depth of darkness and hence
+// the window length: 0 = auto (astronomical −18° with a nautical −12° fallback for
+// short summer nights); a negative value forces that exact sun-altitude threshold
+// (−18 astronomical / −12 nautical / −6 civil).
+static std::optional<NightWindow> computeNightWindow(double latDeg,double lonDeg,
+    const QDate& eveningLocalDate,double thresholdDeg){
   if(fabs(latDeg)>80.0) return {};
   const double lat=deg2rad(latDeg),lon=deg2rad(lonDeg);
-  QDateTime n=nowUtc(), s=n.addSecs(-(n.time().minute()%10)*60), e=s.addSecs(24*3600);
+  // Anchor the 24h scan at local noon of the chosen evening so the night that
+  // follows it (dusk → next dawn) is captured as a single contiguous block.
+  QDateTime startLocal(eveningLocalDate,QTime(12,0),QTimeZone::systemTimeZone());
+  QDateTime n=nowUtc(), s=startLocal.toUTC();
+  // If the chosen night is the current one and we're already into it, start from
+  // "now" so we never offer a window that has partly elapsed.
+  if(n>s) s=n;
+  s=s.addSecs(-(s.time().minute()%10)*60);
+  QDateTime e=s.addSecs(24*3600);
   const int step=600;
   auto build=[&](double thr)->std::optional<NightWindow>{
     QVector<QDateTime> dark;
@@ -447,6 +473,7 @@ static std::optional<NightWindow> computeTonightWindow(double latDeg,double lonD
     if(chosen.isEmpty())return {};
     NightWindow w; w.startUtc=chosen.first();w.endUtc=chosen.last();w.gridUtc=chosen; return w;
   };
+  if(thresholdDeg<0.0) return build(thresholdDeg);
   auto a=build(-18.0); if(a)return a; return build(-12.0);
 }
 static double maxAltAtTransitDeg(double lat,double dec){return 90.0-fabs(lat-dec);}
@@ -2442,10 +2469,44 @@ public:
     dbLbl_ = new QLabel("DB: …");
     dbLbl_->setStyleSheet(theme::chip(theme::Nebula));
 
+    // --- Night planning controls: which night, and how dark a window ---------
+    auto* nightOfLbl=new QLabel("Night of:");
+    nightOfLbl->setStyleSheet(theme::sub("QLabel{color:@plasma@;font-family:@display@;font-weight:600;padding:2px 4px;}"));
+    nightDateEdit_=new QDateEdit(QDate::currentDate());
+    nightDateEdit_->setCalendarPopup(true);
+    nightDateEdit_->setDisplayFormat("ddd dd MMM");
+    nightDateEdit_->setMinimumHeight(30);
+    nightDateEdit_->setToolTip("Evening (dusk) date to plan for. Pick a future night to\n"
+                               "scout targets in advance for the coming nights.");
+    // Plan up to a year ahead; nothing before today (the past isn't observable).
+    nightDateEdit_->setDateRange(QDate::currentDate(),QDate::currentDate().addDays(365));
+
+    auto* darkLbl=new QLabel("Darkness:");
+    darkLbl->setStyleSheet(theme::sub("QLabel{color:@plasma@;font-family:@display@;font-weight:600;padding:2px 4px;}"));
+    darknessCombo_=new QComboBox; darknessCombo_->setMinimumHeight(30);
+    darknessCombo_->setToolTip("How dark the sky must be to count as part of the night.\n"
+                               "Deeper twilight = shorter but darker window.");
+    // userData carries the sun-altitude threshold (0 = auto).
+    darknessCombo_->addItem("Auto (−18°→−12°)",0.0);
+    darknessCombo_->addItem("Astronomical (−18°)",-18.0);
+    darknessCombo_->addItem("Nautical (−12°)",-12.0);
+    darknessCombo_->addItem("Civil (−6°)",-6.0);
+    {
+      int di=darknessCombo_->findData(cfg_.twilightDeg);
+      darknessCombo_->setCurrentIndex(di>=0?di:0);
+    }
+    connect(darknessCombo_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){
+      cfg_.twilightDeg=darknessCombo_->currentData().toDouble();
+      saveConfig(cfg_);
+    });
+
     QPushButton* refreshBtn = new QPushButton("Refresh Targets");
     refreshBtn->setObjectName("cta");
     refreshBtn->setMinimumHeight(32);
     connect(refreshBtn,&QPushButton::clicked,this,&MainWindow::refreshNebulaFirst);
+    // Re-plan immediately when the night or darkness depth changes.
+    connect(nightDateEdit_,&QDateEdit::dateChanged,this,[this](const QDate&){refreshNebulaFirst();});
+    connect(darknessCombo_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){refreshNebulaFirst();});
 
     auto* gearLbl=new QLabel("Gear:");
     gearLbl->setStyleSheet(theme::sub("QLabel{color:@plasma@;font-family:@display@;font-weight:600;padding:2px 4px;}"));
@@ -2494,6 +2555,9 @@ public:
     top->addWidget(locationLbl_,1); top->addWidget(nightLbl_,1); top->addWidget(dbLbl_,1);
     top->addSpacing(8); top->addWidget(gearLbl); top->addWidget(profileCombo_,1);
     top->addWidget(fovInfoLbl_); top->addWidget(gearBtn);
+    top->addSpacing(8);
+    top->addWidget(nightOfLbl); top->addWidget(nightDateEdit_);
+    top->addWidget(darkLbl); top->addWidget(darknessCombo_);
     top->addSpacing(8); top->addWidget(refreshBtn);
 
     framing_ = new FramingWidget;
@@ -2580,13 +2644,16 @@ private slots:
         "\n\n…or build the full catalogue with the importer:\npython import_opengnc_sqlite.py --db \""+appDirPath()+"/catalog.sqlite\" --ngc NGC.csv --addendum addendum.csv --rebuild-aliases");
       return;
     }
-    auto fut=QtConcurrent::run([this](){
+    // Read GUI-thread widget state up front — the worker below must not touch it.
+    const QDate eveningDate = nightDateEdit_ ? nightDateEdit_->date() : QDate::currentDate();
+    const double twilightDeg = darknessCombo_ ? darknessCombo_->currentData().toDouble() : cfg_.twilightDeg;
+    auto fut=QtConcurrent::run([this,eveningDate,twilightDeg](){
       auto loc=getBestLocation(cfg_);
       if(!loc.ok){
         QMetaObject::invokeMethod(this,[this](){setEnabled(true);QMessageBox::warning(this,"Location","Could not detect location via gpsd or IP.\nCheck config.json");},Qt::QueuedConnection);
         return;
       }
-      auto winOpt=computeTonightWindow(loc.lat,loc.lon);
+      auto winOpt=computeNightWindow(loc.lat,loc.lon,eveningDate,twilightDeg);
       if(!winOpt){
         QMetaObject::invokeMethod(this,[this,loc](){
           setEnabled(true);
@@ -2609,10 +2676,16 @@ private slots:
         nebOut.push_back(std::move(o));
       }
       std::sort(nebOut.begin(),nebOut.end(),[this](const DSO&a,const DSO&b){return scoreObject(a,Category::Nebulae)>scoreObject(b,Category::Nebulae);});
-      QMetaObject::invokeMethod(this,[this,loc,win,nebOut=std::move(nebOut)]()mutable{
+      QMetaObject::invokeMethod(this,[this,loc,win,twilightDeg,nebOut=std::move(nebOut)]()mutable{
         location_=loc; night_=win;
         locationLbl_->setText(QString("Location: %1°,%2° (%3)").arg(loc.lat,0,'f',4).arg(loc.lon,0,'f',4).arg(loc.source));
-        nightLbl_->setText(QString("Night: %1 → %2").arg(isoLocal(night_.startUtc)).arg(isoLocal(night_.endUtc)));
+        const double winH=night_.startUtc.secsTo(night_.endUtc)/3600.0;
+        const QString darkName = twilightDeg<0.0
+          ? QString("%1°").arg(twilightDeg,0,'f',0)
+          : QString("auto");
+        nightLbl_->setText(QString("Night: %1 → %2  (%3 h dark, %4)")
+          .arg(isoLocal(night_.startUtc)).arg(isoLocal(night_.endUtc))
+          .arg(winH,0,'f',1).arg(darkName));
         nebulae_=std::move(nebOut); nebShown_=0; nebulaList_->clear(); loadMoreList(Category::Nebulae,nebulaList_);
         galaxies_.clear();clusters_.clear();messier_.clear();
         galLoaded_=cluLoaded_=mesLoaded_=false; galShown_=cluShown_=mesShown_=0;
@@ -2801,6 +2874,8 @@ private:
   AppConfig cfg_;
   QLabel *locationLbl_=nullptr,*nightLbl_=nullptr,*dbLbl_=nullptr;
   QComboBox*  profileCombo_=nullptr;
+  QDateEdit*  nightDateEdit_=nullptr;
+  QComboBox*  darknessCombo_=nullptr;
   QLabel *fovInfoLbl_=nullptr;
   QTabWidget* tabs_=nullptr;
   QTabWidget* plannerTabs_=nullptr;
