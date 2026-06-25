@@ -79,7 +79,7 @@ sudo dnf install qt6-qtbase-devel libcurl-devel cfitsio-devel \
 ## Build
 
 ```bash
-git clone <repo-url> combined_astro
+git clone https://github.com/nirmaljangid/astrotools.git
 cd combined_astro
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
