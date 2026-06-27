@@ -2,6 +2,12 @@
 
 A single-binary Qt6 desktop application combining a deep-sky **target planner**, a **FITS image reviewer** with scored auto-quality-check, and a **FITS frame arranger** for stacking preparation.
 
+> 📖 **New here?** Start with the **[hands-on tutorial](TUTORIAL.md)** — a task-oriented,
+> screenshot-led walkthrough of the full **Plan → Review → Arrange** workflow. This README is the
+> reference manual.
+
+![The Plan tab](docs/img/plan.png)
+
 ---
 
 ## Table of Contents
@@ -80,7 +86,7 @@ sudo dnf install qt6-qtbase-devel libcurl-devel cfitsio-devel \
 
 ```bash
 git clone https://github.com/nirmaljangid/astrotools.git
-cd combined_astro
+cd astrotools
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
