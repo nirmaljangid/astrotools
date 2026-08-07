@@ -260,6 +260,36 @@ Organise a messy capture folder into a stacker-ready tree.
 - The app matches calibration frames to each set of lights by gain (±15%), exposure (±10%), and exact sensor dimensions.
 - Produces a structured folder tree (`arrange_<name>/Target/Filter/lights/…`) ready for stacking in Siril or any other stacker.
 
+### Weather
+
+Is tonight worth setting up? Every hour of the dark window is scored 0–100 and the
+night gets a single **GO / MARGINAL / NO-GO** verdict.
+
+- The score starts from a stacked-layer cloud transmission (low cloud blocks most,
+  high cirrus least), then takes penalties for wind gusts, a closing dew-point
+  spread, rain probability, poor transparency or seeing, and moonlight.
+- **GO** needs 3 h scoring ≥ 60; **MARGINAL** needs 2 h ≥ 45.
+- The chart plots the hourly score as bars against both thresholds, with total
+  cloud cover traced over the top. The table below lists cloud by layer, gusts,
+  dew spread and seeing, with the reason any hour lost points.
+- Location comes from the same gpsd/IP detection the planner uses, and the dark
+  window honours your **darkness depth** setting — so the hours scored here are
+  exactly the hours the planner offers targets for.
+- The forecast loads the first time you open the tab, and reloads whenever the
+  planner re-scans. **Refresh forecast** fetches again on demand.
+
+Sources: [Open-Meteo](https://open-meteo.com) serving DWD **ICON-D2** (cloud by
+layer, gusts, dew point) and [7Timer! ASTRO](http://www.7timer.info) (seeing,
+transparency). Both are free and need no API key. Moon altitude and phase are
+computed locally. If 7Timer is unreachable the forecast still works, minus the
+seeing and transparency terms.
+
+Run it without the GUI — useful over SSH or from cron:
+
+```bash
+astro-toolkit --forecast     # prints the same table; exit 0 GO / 1 MARGINAL / 2 NO-GO
+```
+
 ---
 
 ## Keyboard shortcuts

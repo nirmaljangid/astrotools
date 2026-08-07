@@ -689,6 +689,401 @@ static QString callOpenAI(const AppConfig&cfg,const QString&prompt){
 }
 
 // ============================================================
+// Weather: is tonight worth setting up?
+// ------------------------------------------------------------
+// Scores every dark hour from DWD ICON-D2 (cloud split by layer, gusts, dew
+// point) and 7Timer! ASTRO (seeing, transparency), then penalises moonlight.
+// The same model as ~/bin/astro-forecast.py, so the app and the CLI agree.
+// ============================================================
+namespace wx {
+  constexpr double GustWarn = 20.0, GustStop = 35.0;   // km/h
+  constexpr double DewWarn  = 2.5,  DewStop  = 1.0;    // deg C air-to-dew spread
+  constexpr double GoScore  = 60.0, MarginalScore = 45.0;
+  constexpr int    GoHours  = 3,    MarginalHours = 2; // hours above the score
+
+  // 7Timer! ordinal seeing scale -> arcsec, for display only.
+  inline double seeingArcsec(int s){
+    static const double v[9]={0,0.4,0.6,0.9,1.1,1.4,1.8,2.3,3.0};
+    return (s>=1&&s<=8)?v[s]:0.0;
+  }
+}
+
+struct WxHour {
+  QDateTime tUtc;
+  double cloudLow=-1, cloudMid=-1, cloudHigh=-1;
+  double gust=-1, temp=-1000, dewPt=-1000, precipProb=-1;
+  int seeing=0, transparency=0;
+  double moonAlt=-90, moonIllum=0;
+  double score=0;
+  QStringList warn;
+};
+
+struct WxForecast {
+  QVector<WxHour> hours;
+  QString verdict = "NO DATA";
+  QString bestWindow;
+  QString error;
+  bool ok() const { return !hours.isEmpty() && error.isEmpty(); }
+};
+
+// Low-precision lunar position (Meeus, truncated): good to a few arcmin, which
+// is far beyond what "how bright is the sky tonight" needs.
+static void moonRaDec(double jd,double&ra,double&dec,double&illumFrac){
+  const double d=jd-2451545.0;
+  const double L=deg2rad(std::fmod(218.316+13.176396*d,360.0));   // mean longitude
+  const double M=deg2rad(std::fmod(134.963+13.064993*d,360.0));   // mean anomaly
+  const double F=deg2rad(std::fmod(93.272+13.229350*d,360.0));    // argument of latitude
+  const double lam=L+deg2rad(6.289)*sin(M);                       // ecliptic longitude
+  const double bet=deg2rad(5.128)*sin(F);                         // ecliptic latitude
+  const double eps=deg2rad(23.439-0.0000004*d);
+  ra=wrap2pi(atan2(sin(lam)*cos(eps)-tan(bet)*sin(eps),cos(lam)));
+  dec=asin(sin(bet)*cos(eps)+cos(bet)*sin(eps)*sin(lam));
+  double sra,sdec; sunRaDec(jd,sra,sdec);
+  // phase angle from the sun-moon elongation
+  const double cosElong=sin(sdec)*sin(dec)+cos(sdec)*cos(dec)*cos(sra-ra);
+  illumFrac=(1.0-cosElong)/2.0;
+}
+
+// Stacked-layer transmission: each deck blocks some light, high cirrus least.
+static double wxClearFraction(double low,double mid,double high){
+  double f=1.0;
+  const std::pair<double,double> layers[3]={{low,1.0},{mid,0.95},{high,0.75}};
+  for(const auto&[cov,weight]:layers)
+    if(cov>=0.0) f*=1.0-weight*(cov/100.0);
+  return std::max(0.0,f);
+}
+
+static void wxScoreHour(WxHour&h){
+  h.warn.clear();
+  const double clear=wxClearFraction(h.cloudLow,h.cloudMid,h.cloudHigh);
+  double s=100.0*clear;
+  if(clear<0.5) h.warn<<QString("cloud %1%").arg(100.0*(1.0-clear),0,'f',0);
+
+  if(h.gust>=0){
+    if(h.gust>=wx::GustStop){ s*=0.25; h.warn<<QString("gusts %1 km/h — mount will shake").arg(h.gust,0,'f',0); }
+    else if(h.gust>=wx::GustWarn){
+      s*=1.0-0.4*(h.gust-wx::GustWarn)/(wx::GustStop-wx::GustWarn);
+      h.warn<<QString("gusts %1 km/h").arg(h.gust,0,'f',0);
+    }
+  }
+  if(h.temp>-999&&h.dewPt>-999){
+    const double spread=h.temp-h.dewPt;
+    if(spread<=wx::DewStop){ s*=0.5; h.warn<<QString("dew point reached (%1 °C)").arg(spread,0,'f',1); }
+    else if(spread<=wx::DewWarn){ s*=0.85; h.warn<<QString("dew risk (%1 °C spread)").arg(spread,0,'f',1); }
+  }
+  if(h.precipProb>=30){ s*=0.3; h.warn<<QString("rain %1%").arg(h.precipProb,0,'f',0); }
+  if(h.transparency>=6){ s*=0.75; h.warn<<QString("poor transparency"); }
+  if(h.seeing>=7){ s*=0.85; h.warn<<QString("seeing ~%1\"").arg(wx::seeingArcsec(h.seeing),0,'f',1); }
+  if(h.moonAlt>0&&h.moonIllum>0.40){
+    s*=1.0-0.25*h.moonIllum*std::min(1.0,h.moonAlt/40.0);
+    h.warn<<QString("moon %1% at %2°").arg(h.moonIllum*100,0,'f',0).arg(h.moonAlt,0,'f',0);
+  }
+  h.score=std::clamp(s,0.0,100.0);
+}
+
+// Worker-thread call: two HTTP fetches, merged onto the night's hourly grid.
+static WxForecast fetchWeather(double lat,double lon,const NightWindow&win){
+  WxForecast out;
+  if(!win.startUtc.isValid()||!win.endUtc.isValid()){ out.error="No dark window"; return out; }
+
+  // QString::number, not std::to_string: Qt calls setlocale(LC_ALL,"") at start-up,
+  // so under a de_DE locale std::to_string would write "53,46" and break the URL.
+  const std::string latS=QString::number(lat,'f',6).toStdString();
+  const std::string lonS=QString::number(lon,'f',6).toStdString();
+  const std::string base="https://api.open-meteo.com/v1/forecast?latitude="
+    +latS+"&longitude="+lonS
+    +"&hourly=cloud_cover_low,cloud_cover_mid,cloud_cover_high,temperature_2m,"
+     "dew_point_2m,wind_gusts_10m,precipitation_probability"
+     "&models=icon_d2&forecast_days=3&timezone=GMT";
+  auto resp=httpGet(base);
+  if(!resp){ out.error="Could not reach Open-Meteo (offline?)"; return out; }
+
+  QMap<QString,WxHour> byHour;
+  try{
+    auto j=json::parse(*resp);
+    const auto&hj=j.at("hourly");
+    const auto&times=hj.at("time");
+    auto num=[&](const char*key,size_t i)->double{
+      if(!hj.contains(key)||hj[key][i].is_null()) return -1;
+      return hj[key][i].get<double>();
+    };
+    for(size_t i=0;i<times.size();++i){
+      WxHour h;
+      h.tUtc=QDateTime::fromString(QString::fromStdString(times[i].get<std::string>()),
+                                   Qt::ISODate);
+      h.tUtc.setTimeZone(QTimeZone::utc());
+      if(!h.tUtc.isValid()) continue;
+      h.cloudLow=num("cloud_cover_low",i);
+      h.cloudMid=num("cloud_cover_mid",i);
+      h.cloudHigh=num("cloud_cover_high",i);
+      h.temp=num("temperature_2m",i);
+      h.dewPt=num("dew_point_2m",i);
+      h.gust=num("wind_gusts_10m",i);
+      h.precipProb=num("precipitation_probability",i);
+      byHour.insert(h.tUtc.toString(Qt::ISODate),h);
+    }
+  }catch(const std::exception&e){
+    out.error=QString("Open-Meteo parse error: %1").arg(e.what());
+    return out;
+  }
+
+  // 7Timer is optional: seeing and transparency only sharpen the score.
+  const std::string astroUrl="http://www.7timer.info/bin/astro.php?lon="
+    +lonS+"&lat="+latS
+    +"&ac=0&unit=metric&output=json&tzshift=0";
+  QMap<qint64,QPair<int,int>> astro;   // epoch -> (seeing, transparency)
+  if(auto ar=httpGet(astroUrl)){
+    try{
+      auto j=json::parse(*ar);
+      const QString initStr=QString::fromStdString(j.at("init").get<std::string>());
+      QDateTime init=QDateTime::fromString(initStr,"yyyyMMddHH");
+      init.setTimeZone(QTimeZone::utc());
+      for(const auto&row:j.at("dataseries")){
+        const QDateTime t=init.addSecs(row.at("timepoint").get<int>()*3600);
+        astro.insert(t.toSecsSinceEpoch(),
+                     {row.value("seeing",0),row.value("transparency",0)});
+      }
+    }catch(const std::exception&){ /* forecast still works without it */ }
+  }
+
+  const double latR=deg2rad(lat),lonR=deg2rad(lon);
+  QDateTime t=win.startUtc;
+  t=QDateTime(t.date(),QTime(t.time().hour(),0),QTimeZone::utc());
+  for(;t<=win.endUtc;t=t.addSecs(3600)){
+    auto it=byHour.find(t.toString(Qt::ISODate));
+    if(it==byHour.end()) continue;
+    WxHour h=*it;
+    if(!astro.isEmpty()){
+      // 7Timer runs 3-hourly: accept the nearest slot within 90 minutes.
+      qint64 want=t.toSecsSinceEpoch(),bestKey=0,bestGap=LLONG_MAX;
+      for(auto k=astro.constBegin();k!=astro.constEnd();++k){
+        const qint64 gap=std::llabs(k.key()-want);
+        if(gap<bestGap){ bestGap=gap; bestKey=k.key(); }
+      }
+      if(bestGap<=5400){ h.seeing=astro[bestKey].first; h.transparency=astro[bestKey].second; }
+    }
+    double mra,mdec,illum,malt,maz;
+    moonRaDec(julianDateUTC(t),mra,mdec,illum);
+    altAz(julianDateUTC(t),latR,lonR,mra,mdec,malt,maz);
+    h.moonAlt=rad2deg(malt); h.moonIllum=illum;
+    wxScoreHour(h);
+    out.hours.push_back(h);
+  }
+  if(out.hours.isEmpty()){ out.error="No model data covering tonight's dark window"; return out; }
+
+  // Longest run of usable hours decides the verdict.
+  int best=0,cur=0,bestEnd=-1;
+  for(int i=0;i<out.hours.size();++i){
+    if(out.hours[i].score>=wx::MarginalScore){ if(++cur>best){best=cur;bestEnd=i;} }
+    else cur=0;
+  }
+  double mean=0;
+  if(best>0){
+    for(int i=bestEnd-best+1;i<=bestEnd;++i) mean+=out.hours[i].score;
+    mean/=best;
+    const QDateTime s=out.hours[bestEnd-best+1].tUtc;
+    QDateTime e=out.hours[bestEnd].tUtc.addSecs(3600);
+    if(e>win.endUtc) e=win.endUtc;
+    out.bestWindow=QString("%1 → %2  (%3 h, mean %4/100)")
+      .arg(s.toLocalTime().toString("HH:mm")).arg(e.toLocalTime().toString("HH:mm"))
+      .arg(s.secsTo(e)/3600.0,0,'f',1).arg(mean,0,'f',0);
+  }
+  out.verdict = (best>=wx::GoHours&&mean>=wx::GoScore) ? "GO"
+              : (best>=wx::MarginalHours&&mean>=wx::MarginalScore) ? "MARGINAL" : "NO-GO";
+  return out;
+}
+
+// ---- painted forecast chart ------------------------------------------------
+class WeatherChartWidget : public QWidget {
+  Q_OBJECT
+public:
+  explicit WeatherChartWidget(QWidget*p=nullptr):QWidget(p){ setMinimumHeight(210); }
+  void setForecast(const WxForecast&f){ fc_=f; update(); }
+protected:
+  void paintEvent(QPaintEvent*)override{
+    QPainter p(this); p.setRenderHint(QPainter::Antialiasing);
+    p.fillRect(rect(),QColor(10,13,24));
+    const int W=width(),H=height();
+    const int L=42,R=16,T=16,B=26;
+    if(fc_.hours.isEmpty()){
+      p.setPen(QColor(139,145,168)); p.setFont(QFont("Inter",10));
+      p.drawText(rect(),Qt::AlignCenter,
+                 fc_.error.isEmpty()?"Scan a night to load the forecast":fc_.error);
+      return;
+    }
+    const int n=fc_.hours.size();
+    const double plotW=W-L-R,plotH=H-T-B;
+    auto yOf=[&](double pct){ return T+(100.0-pct)/100.0*plotH; };
+    auto xOf=[&](int i){ return L+(n==1?plotW/2:i*plotW/(n-1)); };
+
+    for(int v=0;v<=100;v+=25){
+      p.setPen(QPen(QColor(255,255,255,26),1,Qt::DotLine));
+      p.drawLine(QPointF(L,yOf(v)),QPointF(W-R,yOf(v)));
+      p.setPen(QColor(139,145,168,180)); p.setFont(QFont("Inter",7));
+      p.drawText(QRectF(0,yOf(v)-8,L-6,16),Qt::AlignRight|Qt::AlignVCenter,QString::number(v));
+    }
+    // thresholds
+    p.setPen(QPen(QColor(94,234,212,110),1,Qt::DashLine));
+    p.drawLine(QPointF(L,yOf(wx::GoScore)),QPointF(W-R,yOf(wx::GoScore)));
+    p.setPen(QPen(QColor(245,180,0,110),1,Qt::DashLine));
+    p.drawLine(QPointF(L,yOf(wx::MarginalScore)),QPointF(W-R,yOf(wx::MarginalScore)));
+
+    const double bw=std::max(6.0,plotW/std::max(1,n)*0.62);
+    for(int i=0;i<n;++i){
+      const WxHour&h=fc_.hours[i];
+      QColor c = h.score>=wx::GoScore      ? QColor(94,234,212)
+               : h.score>=wx::MarginalScore? QColor(245,180,0)
+                                           : QColor(244,114,114);
+      QRectF bar(xOf(i)-bw/2,yOf(h.score),bw,yOf(0)-yOf(h.score));
+      QLinearGradient g(bar.topLeft(),bar.bottomLeft());
+      g.setColorAt(0,QColor(c.red(),c.green(),c.blue(),210));
+      g.setColorAt(1,QColor(c.red(),c.green(),c.blue(),70));
+      p.setPen(Qt::NoPen); p.setBrush(g);
+      p.drawRoundedRect(bar,3,3);
+      p.setPen(QColor(233,236,245,200)); p.setFont(QFont("Inter",7,QFont::Bold));
+      p.drawText(QRectF(xOf(i)-18,yOf(h.score)-15,36,14),Qt::AlignCenter,
+                 QString::number(h.score,'f',0));
+      p.setPen(QColor(139,145,168)); p.setFont(QFont("Inter",7));
+      p.drawText(QRectF(xOf(i)-22,H-B+4,44,16),Qt::AlignCenter,
+                 h.tUtc.toLocalTime().toString("HH:mm"));
+    }
+    // cloud cover trace over the bars
+    QPainterPath cloud;
+    for(int i=0;i<n;++i){
+      const WxHour&h=fc_.hours[i];
+      const double cov=100.0*(1.0-wxClearFraction(h.cloudLow,h.cloudMid,h.cloudHigh));
+      if(i==0) cloud.moveTo(xOf(i),yOf(cov)); else cloud.lineTo(xOf(i),yOf(cov));
+    }
+    p.setBrush(Qt::NoBrush); p.setPen(QPen(QColor(217,70,239,180),2));
+    p.drawPath(cloud);
+  }
+private:
+  WxForecast fc_;
+};
+
+// ---- the Weather tab -------------------------------------------------------
+class WeatherPanel : public QWidget {
+  Q_OBJECT
+public:
+  explicit WeatherPanel(QWidget*p=nullptr):QWidget(p){
+    auto* v=new QVBoxLayout(this); v->setContentsMargins(14,14,14,14); v->setSpacing(10);
+
+    auto* top=new QHBoxLayout;
+    verdictLbl_=new QLabel("Weather: not loaded");
+    verdictLbl_->setStyleSheet(theme::chip(theme::InkDim));
+    windowLbl_=new QLabel("Best window: —");
+    windowLbl_->setStyleSheet(theme::chip(theme::Stellar));
+    refreshBtn_=new QPushButton("Refresh forecast");
+    refreshBtn_->setObjectName("scan");
+    connect(refreshBtn_,&QPushButton::clicked,this,[this]{ reload(); });
+    top->addWidget(verdictLbl_,0); top->addWidget(windowLbl_,1);
+    top->addStretch(1); top->addWidget(refreshBtn_,0);
+    v->addLayout(top);
+
+    chart_=new WeatherChartWidget;
+    chart_->setStyleSheet(theme::sub("QWidget{background-color:@deep@;"
+      "border:1px solid rgba(255,255,255,0.07);border-radius:12px;}"));
+    v->addWidget(chart_,3);
+
+    detail_=new QPlainTextEdit; detail_->setReadOnly(true);
+    v->addWidget(detail_,2);
+
+    hintLbl_=new QLabel("Sources: DWD ICON-D2 (cloud, wind, dew) · 7Timer! ASTRO "
+                        "(seeing, transparency) · moon computed locally");
+    v->addWidget(hintLbl_,0);
+  }
+
+  // Called by MainWindow once a scan has produced a location and dark window.
+  void setContext(const LocationFix&loc,const NightWindow&win){
+    loc_=loc; win_=win;
+    reload();
+  }
+
+protected:
+  // Fetch the first time the tab is actually looked at, not on start-up: no
+  // network traffic for a session that never opens it.
+  void showEvent(QShowEvent*e)override{
+    QWidget::showEvent(e);
+    if(!loadedOnce_){ loadedOnce_=true; reload(); }
+  }
+
+private:
+  void reload(){
+    if(busy_) return;
+    // The tab stands on its own: if the planner has not run yet, work out the
+    // location and dark window here rather than telling the user to go and scan.
+    const bool needContext=!loc_.ok||!win_.startUtc.isValid();
+    busy_=true; refreshBtn_->setEnabled(false);
+    verdictLbl_->setText("Weather: fetching…");
+    verdictLbl_->setStyleSheet(theme::chip(theme::Plasma));
+
+    auto* w=new QFutureWatcher<WxForecast>(this);
+    connect(w,&QFutureWatcher<WxForecast>::finished,this,[this,w](){
+      const WxForecast f=w->result(); w->deleteLater();
+      busy_=false; refreshBtn_->setEnabled(true);
+      apply(f);
+    });
+    const double lat=loc_.lat,lon=loc_.lon; const NightWindow win=win_;
+    w->setFuture(QtConcurrent::run([lat,lon,win,needContext]()->WxForecast{
+      if(!needContext) return fetchWeather(lat,lon,win);
+      const AppConfig cfg=loadConfig();
+      const LocationFix loc=getBestLocation(cfg);
+      if(!loc.ok){ WxForecast f; f.error="No location from gpsd or IP geolocation"; return f; }
+      const auto own=computeNightWindow(loc.lat,loc.lon,QDate::currentDate(),cfg.twilightDeg);
+      if(!own){ WxForecast f; f.error="No dark window in the next 24 h"; return f; }
+      return fetchWeather(loc.lat,loc.lon,*own);
+    }));
+  }
+
+  void apply(const WxForecast&f){
+    chart_->setForecast(f);
+    if(!f.ok()){
+      verdictLbl_->setText("Weather: "+(f.error.isEmpty()?QString("no data"):f.error));
+      verdictLbl_->setStyleSheet(theme::chip(theme::Danger));
+      windowLbl_->setText("Best window: —");
+      detail_->setPlainText(f.error);
+      return;
+    }
+    const char* hue = f.verdict=="GO" ? theme::Aurora
+                    : f.verdict=="MARGINAL" ? theme::Stellar : theme::Danger;
+    verdictLbl_->setText("Tonight: "+f.verdict);
+    verdictLbl_->setStyleSheet(theme::chip(hue));
+    windowLbl_->setText("Best window: "+(f.bestWindow.isEmpty()?QString("none"):f.bestWindow));
+
+    QString t;
+    t+=QString("%1  %2  %3  %4  %5  %6\n")
+        .arg("hour",-7).arg("score",6).arg("cloud L/M/H",13)
+        .arg("gust",6).arg("dew",6).arg("seeing",7);
+    t+=QString(60,'-')+"\n";
+    for(const WxHour&h:f.hours){
+      auto pct=[](double v){ return v<0?QString("  -"):QString::number(v,'f',0); };
+      const QString cl=pct(h.cloudLow)+"/"+pct(h.cloudMid)+"/"+pct(h.cloudHigh);
+      const QString dew=(h.temp>-999&&h.dewPt>-999)
+        ? QString::number(h.temp-h.dewPt,'f',1) : QString("-");
+      const QString see=h.seeing?QString::number(wx::seeingArcsec(h.seeing),'f',1)+"\"":QString("-");
+      t+=QString("%1  %2  %3  %4  %5  %6\n")
+          .arg(h.tUtc.toLocalTime().toString("HH:mm"),-7)
+          .arg(h.score,6,'f',0).arg(cl,13)
+          .arg(h.gust<0?QString("-"):QString::number(h.gust,'f',0),6)
+          .arg(dew,6).arg(see,7);
+      if(!h.warn.isEmpty()) t+=QString("         ↳ %1\n").arg(h.warn.join(", "));
+    }
+    detail_->setPlainText(t);
+  }
+
+  LocationFix loc_;
+  NightWindow win_;
+  bool busy_=false;
+  bool loadedOnce_=false;
+  QLabel* verdictLbl_=nullptr;
+  QLabel* windowLbl_=nullptr;
+  QLabel* hintLbl_=nullptr;
+  QPushButton* refreshBtn_=nullptr;
+  WeatherChartWidget* chart_=nullptr;
+  QPlainTextEdit* detail_=nullptr;
+};
+
+// ============================================================
 // SkyPlotWidget
 // ============================================================
 class SkyPlotWidget : public QWidget {
@@ -2454,6 +2849,8 @@ public:
     tabs_->addTab(fitsReviewer_, "Review");
     arrangePanel_ = new ArrangeFitsPanel;
     tabs_->addTab(arrangePanel_, "Arrange");
+    weatherPanel_ = new WeatherPanel;
+    tabs_->addTab(weatherPanel_, "Weather");
 
     connect(tabs_, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
     connect(plannerTabs_, &QTabWidget::currentChanged, this, &MainWindow::onPlannerTabChanged);
@@ -2678,6 +3075,7 @@ private slots:
       std::sort(nebOut.begin(),nebOut.end(),[this](const DSO&a,const DSO&b){return scoreObject(a,Category::Nebulae)>scoreObject(b,Category::Nebulae);});
       QMetaObject::invokeMethod(this,[this,loc,win,twilightDeg,nebOut=std::move(nebOut)]()mutable{
         location_=loc; night_=win;
+        if(weatherPanel_) weatherPanel_->setContext(location_,night_);
         locationLbl_->setText(QString("Location: %1°,%2° (%3)").arg(loc.lat,0,'f',4).arg(loc.lon,0,'f',4).arg(loc.source));
         const double winH=night_.startUtc.secsTo(night_.endUtc)/3600.0;
         const QString darkName = twilightDeg<0.0
@@ -2898,13 +3296,62 @@ private:
   int nebShown_=0,galShown_=0,cluShown_=0,mesShown_=0;
   bool galLoaded_=false,cluLoaded_=false,mesLoaded_=false;
   QWidget*           rightPanel_=nullptr;
+  WeatherPanel* weatherPanel_=nullptr;
   FitsReviewerPanel* fitsReviewer_=nullptr;
   ArrangeFitsPanel*  arrangePanel_=nullptr;
 };
 
 #include "main.moc"
 
+// Headless forecast: the same scoring the Weather tab shows, printed to stdout
+// so it can be checked over SSH or run from cron. Exit code doubles as the
+// verdict — 0 GO, 1 MARGINAL, 2 NO-GO or no data.
+static int runForecastCli(){
+  curl_global_init(CURL_GLOBAL_DEFAULT);
+  const AppConfig cfg=loadConfig();
+  const LocationFix loc=getBestLocation(cfg);
+  if(!loc.ok){
+    fprintf(stderr,"Could not determine location via gpsd or IP geolocation\n");
+    curl_global_cleanup(); return 2;
+  }
+  const auto win=computeNightWindow(loc.lat,loc.lon,QDate::currentDate(),cfg.twilightDeg);
+  if(!win){
+    fprintf(stderr,"No dark window in the next 24 h\n");
+    curl_global_cleanup(); return 2;
+  }
+  const WxForecast f=fetchWeather(loc.lat,loc.lon,*win);
+  printf("Astro Toolkit forecast — location via %s\n", qUtf8Printable(loc.source));
+  printf("dark %s → %s\n", qUtf8Printable(isoLocal(win->startUtc)),
+                           qUtf8Printable(isoLocal(win->endUtc)));
+  if(!f.ok()){
+    fprintf(stderr,"%s\n", qUtf8Printable(f.error.isEmpty()?QString("no data"):f.error));
+    curl_global_cleanup(); return 2;
+  }
+  printf("VERDICT: %s   best window %s\n\n", qUtf8Printable(f.verdict),
+         qUtf8Printable(f.bestWindow.isEmpty()?QString("none"):f.bestWindow));
+  printf("hour   score  cloud L/M/H   gust   dew  seeing  notes\n");
+  for(const WxHour&h:f.hours){
+    auto pct=[](double v){ return v<0?QString("-"):QString::number(v,'f',0); };
+    printf("%-6s %5.0f  %11s %6s %5s %7s  %s\n",
+      qUtf8Printable(h.tUtc.toLocalTime().toString("HH:mm")), h.score,
+      qUtf8Printable(pct(h.cloudLow)+"/"+pct(h.cloudMid)+"/"+pct(h.cloudHigh)),
+      qUtf8Printable(h.gust<0?QString("-"):QString::number(h.gust,'f',0)),
+      qUtf8Printable((h.temp>-999&&h.dewPt>-999)?QString::number(h.temp-h.dewPt,'f',1):QString("-")),
+      qUtf8Printable(h.seeing?QString::number(wx::seeingArcsec(h.seeing),'f',1)+"\"":QString("-")),
+      qUtf8Printable(h.warn.join(", ")));
+  }
+  curl_global_cleanup();
+  return f.verdict=="GO"?0:f.verdict=="MARGINAL"?1:2;
+}
+
 int main(int argc,char** argv){
+  for(int i=1;i<argc;++i)
+    if(QString::fromLocal8Bit(argv[i])=="--forecast"){
+      QCoreApplication core(argc,argv);   // no GUI, no display needed
+      QCoreApplication::setOrganizationName("AstroToolkit");
+      QCoreApplication::setApplicationName("astro_toolkit");
+      return runForecastCli();
+    }
   QApplication app(argc,argv);
   // Identify the app so QSettings has a stable store for remembered folders.
   QApplication::setOrganizationName("AstroToolkit");
